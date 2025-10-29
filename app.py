@@ -43,20 +43,23 @@ def handle_webhook():
         
         # Execute trade on Hyperliquid
         if side in ['buy', 'sell']:
-            result = hl.order(symbol, side == 'buy', size, order_type)
-            print(f"Hyperliquid response: {result}")
-            
-            if result.get('status') == 'ok':
-                return jsonify({
-                    "status": "success",
-                    "message": f"Order executed: {side} {size} {symbol}",
-                    "order_id": result.get('order_id')
-                })
-            else:
-                return jsonify({
-                    "status": "error",
-                    "message": result.get('error', 'Unknown error from Hyperliquid')
-                }), 400
+        result = hl.order(symbol, side == 'buy', size, order_type)
+        print(f"Hyperliquid response: {result}")
+    
+    # Handle different response formats
+    if result.get('status') == 'ok' or 'response' in result:
+        return jsonify({
+            "status": "success", 
+            "message": f"Order executed: {side} {size} {symbol}",
+            "details": result
+        })
+    else:
+        error_msg = result.get('error', 'Unknown error from Hyperliquid')
+        return jsonify({
+            "status": "error",
+            "message": error_msg
+        }), 400
+        
         else:
             return jsonify({"error": "Invalid side. Use 'buy' or 'sell'"}), 400
             
