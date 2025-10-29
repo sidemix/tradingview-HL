@@ -11,36 +11,40 @@ app = Flask(__name__)
 # Initialize Hyperliquid client
 hl = Hyperliquid(WALLET_ADDRESS, SECRET_KEY)
 
-def verify_tradingview_webhook(data, signature):
-    """
-    Verify the webhook came from TradingView
-    You can add your own secret verification here
-    """
-    # Implement your verification logic here
-    return True
-
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     try:
-        # Get the webhook data
-        data = request.get_json()
+        # Get raw data first for debugging
+        raw_data = request.get_data(as_text=True)
+        print(f"Raw data received: {raw_data}")
         
-        # Verify the webhook (optional but recommended)
-        signature = request.headers.get('X-Signature')
-        if not verify_tradingview_webhook(data, signature):
-            return jsonify({"error": "Invalid signature"}), 401
+        if not raw_data or raw_data.strip() == '':
+            return jsonify({"error": "Empty request body"}), 400
         
-        # Parse the trading alert
+        # Try to parse JSON
+        try:
+            data = request.get_json()
+        except Exception as e:
+            print(f"JSON parse error: {str(e)}")
+            return jsonify({"error": f"Invalid JSON: {str(e)}"}), 400
+        
+        if data is None:
+            return jsonify({"error": "No JSON data received"}), 400
+        
+        print(f"Parsed data: {data}")
+        
+        # Parse the trading alert with defaults
         symbol = data.get('symbol', 'BTC').upper()
         side = data.get('side', '').lower()
         size = float(data.get('size', 0.01))
         order_type = data.get('order_type', 'market')
         
-        print(f"Received order: {side} {size} {symbol}")
+        print(f"Processing order: {side} {size} {symbol}")
         
         # Execute trade on Hyperliquid
         if side in ['buy', 'sell']:
             result = hl.order(symbol, side == 'buy', size, order_type)
+            print(f"Hyperliquid response: {result}")
             
             if result.get('status') == 'ok':
                 return jsonify({
@@ -51,7 +55,7 @@ def handle_webhook():
             else:
                 return jsonify({
                     "status": "error",
-                    "message": result.get('error', 'Unknown error')
+                    "message": result.get('error', 'Unknown error from Hyperliquid')
                 }), 400
         else:
             return jsonify({"error": "Invalid side. Use 'buy' or 'sell'"}), 400
