@@ -28,6 +28,8 @@ class Hyperliquid:
             }
         }
         
+        print(f"Sending order to Hyperliquid: {order_data}")
+        
         # Generate signature
         signature = self._sign_request(order_data)
         
@@ -40,11 +42,19 @@ class Hyperliquid:
             response = requests.post(
                 f"{self.base_url}{endpoint}",
                 json=order_data,
-                headers=headers
+                headers=headers,
+                timeout=10  # Add timeout
             )
+            print(f"Hyperliquid API response status: {response.status_code}")
+            print(f"Hyperliquid API response text: {response.text}")
+            
             return response.json()
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+        except requests.exceptions.RequestException as e:
+            print(f"Request error: {str(e)}")
+            return {"status": "error", "error": f"Request failed: {str(e)}"}
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {str(e)}")
+            return {"status": "error", "error": f"Invalid response from Hyperliquid: {str(e)}"}
     
     def _sign_request(self, data):
         """
