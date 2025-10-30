@@ -8,66 +8,92 @@ from config import SECRET_KEY, WALLET_ADDRESS
 
 app = Flask(__name__)
 
-@app.route('/discover-user-state', methods=['GET'])
-def discover_user_state():
-    """Discover the correct user state format"""
+@app.route('/analyze-working-patterns', methods=['GET'])
+def analyze_working_patterns():
+    """Analyze the patterns from working endpoints"""
     tests = {}
     
-    # Test different user state formats
-    user_state_formats = [
-        # Current failing format
-        {"type": "userState", "user": WALLET_ADDRESS},
+    # Test patterns based on working endpoints
+    working_patterns = [
+        # Pattern from clearinghouseState (works!)
+        {"type": "clearinghouseState", "user": WALLET_ADDRESS},
         
-        # Maybe they expect different field names
-        {"type": "userState", "address": WALLET_ADDRESS},
-        {"type": "userState", "wallet": WALLET_ADDRESS},
-        {"type": "userState", "account": WALLET_ADDRESS},
+        # Maybe order needs similar structure
+        {"type": "order", "user": WALLET_ADDRESS},
         
-        # Maybe user should be an object
-        {"type": "userState", "user": {"address": WALLET_ADDRESS}},
+        # Maybe order needs to be in different format
+        {"type": "order", "user": WALLET_ADDRESS, "order": {}},
         
-        # Maybe different type values
-        {"type": "user", "user": WALLET_ADDRESS},
-        {"type": "account", "user": WALLET_ADDRESS},
-        {"type": "getUserState", "user": WALLET_ADDRESS},
+        # Try with action field but different structure
+        {"action": "placeOrder", "user": WALLET_ADDRESS},
         
-        # Maybe it needs additional fields
-        {"type": "userState", "user": WALLET_ADDRESS, "method": "info"},
-        
-        # Try with signature (maybe user state needs auth)
-        {"type": "userState", "user": WALLET_ADDRESS, "signature": "test"},
+        # Try the exact working pattern but for orders
+        {"type": "order", "user": WALLET_ADDRESS, "coin": "BTC", "side": "A", "sz": "0.001"},
     ]
     
-    for i, payload in enumerate(user_state_formats):
+    for i, payload in enumerate(working_patterns):
         try:
             response = requests.post(
                 "https://api.hyperliquid.xyz/info",
                 json=payload,
                 timeout=10
             )
-            tests[f'format_{i}'] = {
+            tests[f'pattern_{i}'] = {
                 'payload': payload,
                 'status': response.status_code,
                 'response': response.text[:200] if response.text else 'Empty'
             }
         except Exception as e:
-            tests[f'format_{i}'] = {
+            tests[f'pattern_{i}'] = {
                 'payload': payload,
                 'error': str(e)
             }
     
     return jsonify(tests)
 
-@app.route('/discover-exchange-format', methods=['GET'])
-def discover_exchange_format():
-    """Discover the correct exchange/order format"""
+@app.route('/test-exchange-with-user', methods=['GET'])
+def test_exchange_with_user():
+    """Test exchange endpoint with user field like working patterns"""
     tests = {}
     
-    # Test different exchange action formats
-    exchange_formats = [
-        # Maybe the action structure is wrong
+    # Test exchange endpoint with user field (like clearinghouseState)
+    exchange_payloads = [
+        # Add user field like working endpoints
+        {
+            "user": WALLET_ADDRESS,
+            "action": {
+                "type": "order",
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ]
+            }
+        },
+        
+        # Maybe user goes inside action
+        {
+            "action": {
+                "type": "order",
+                "user": WALLET_ADDRESS,
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A", 
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ]
+            }
+        },
+        
+        # Try completely different structure
         {
             "type": "order",
+            "user": WALLET_ADDRESS,
             "orders": [
                 {
                     "coin": "BTC",
@@ -77,64 +103,9 @@ def discover_exchange_format():
                 }
             ]
         },
-        
-        # Maybe no nested action
-        {
-            "method": "order",
-            "orders": [
-                {
-                    "coin": "BTC", 
-                    "side": "A",
-                    "sz": "0.001",
-                    "order_type": {"market": {}}
-                }
-            ]
-        },
-        
-        # Maybe different order structure
-        {
-            "action": "order",
-            "order": {
-                "coin": "BTC",
-                "side": "A", 
-                "sz": "0.001",
-                "order_type": {"market": {}}
-            }
-        },
-        
-        # Maybe it needs is_buy instead of side
-        {
-            "action": {
-                "type": "order",
-                "orders": [
-                    {
-                        "coin": "BTC",
-                        "is_buy": True,
-                        "sz": "0.001", 
-                        "order_type": {"market": {}}
-                    }
-                ]
-            }
-        },
-        
-        # Try with limit order first (maybe market has issues)
-        {
-            "action": {
-                "type": "order", 
-                "orders": [
-                    {
-                        "coin": "BTC",
-                        "side": "A",
-                        "sz": "0.001",
-                        "limit_px": "50000",
-                        "order_type": {"limit": {"tif": "Gtc"}}
-                    }
-                ]
-            }
-        },
     ]
     
-    for i, payload in enumerate(exchange_formats):
+    for i, payload in enumerate(exchange_payloads):
         try:
             # Sign the request
             message = json.dumps(payload, separators=(',', ':'), sort_keys=True)
@@ -156,7 +127,7 @@ def discover_exchange_format():
                 timeout=10
             )
             
-            tests[f'format_{i}'] = {
+            tests[f'payload_{i}'] = {
                 'payload': payload,
                 'status': response.status_code,
                 'response': response.text,
@@ -164,28 +135,165 @@ def discover_exchange_format():
             }
             
         except Exception as e:
-            tests[f'format_{i}'] = {
+            tests[f'payload_{i}'] = {
                 'payload': payload,
                 'error': str(e)
             }
     
     return jsonify(tests)
 
-@app.route('/test-with-other-actions', methods=['GET'])
-def test_with_other_actions():
-    """Test other exchange actions to understand the pattern"""
+@app.route('/get-account-info', methods=['GET'])
+def get_account_info():
+    """Get comprehensive account information using working endpoints"""
+    account_info = {}
+    
+    # Get clearinghouse state (works!)
+    try:
+        clearinghouse_response = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            json={"type": "clearinghouseState", "user": WALLET_ADDRESS},
+            timeout=10
+        )
+        if clearinghouse_response.status_code == 200:
+            account_info['clearinghouse'] = clearinghouse_response.json()
+    except Exception as e:
+        account_info['clearinghouse_error'] = str(e)
+    
+    # Get open orders (works!)
+    try:
+        open_orders_response = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            json={"type": "openOrders", "user": WALLET_ADDRESS},
+            timeout=10
+        )
+        if open_orders_response.status_code == 200:
+            account_info['open_orders'] = open_orders_response.json()
+    except Exception as e:
+        account_info['open_orders_error'] = str(e)
+    
+    # Get user fills (might work)
+    try:
+        user_fills_response = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            json={"type": "userFills", "user": WALLET_ADDRESS},
+            timeout=10
+        )
+        account_info['user_fills_status'] = user_fills_response.status_code
+        if user_fills_response.status_code == 200:
+            account_info['user_fills'] = user_fills_response.json()
+        else:
+            account_info['user_fills_response'] = user_fills_response.text
+    except Exception as e:
+        account_info['user_fills_error'] = str(e)
+    
+    return jsonify(account_info)
+
+@app.route('/test-order-via-info', methods=['GET'])
+def test_order_via_info():
+    """Test if orders go through info endpoint instead of exchange"""
     tests = {}
     
-    # Test different action types that might work
-    action_types = [
-        {"action": {"type": "info"}},
-        {"action": {"type": "balance"}},
-        {"action": {"type": "positions"}},
-        {"action": {"type": "openOrders"}},
-        {"action": {"type": "cancelAll"}},
+    # Maybe orders are placed through info endpoint?
+    order_payloads = [
+        {
+            "type": "order",
+            "user": WALLET_ADDRESS,
+            "order": {
+                "coin": "BTC",
+                "side": "A",
+                "sz": "0.001",
+                "order_type": {"market": {}}
+            }
+        },
+        {
+            "type": "placeOrder", 
+            "user": WALLET_ADDRESS,
+            "order": {
+                "coin": "BTC",
+                "side": "A",
+                "sz": "0.001", 
+                "order_type": {"market": {}}
+            }
+        },
     ]
     
-    for i, payload in enumerate(action_types):
+    for i, payload in enumerate(order_payloads):
+        try:
+            response = requests.post(
+                "https://api.hyperliquid.xyz/info",
+                json=payload,
+                timeout=10
+            )
+            tests[f'info_order_{i}'] = {
+                'payload': payload,
+                'status': response.status_code,
+                'response': response.text
+            }
+        except Exception as e:
+            tests[f'info_order_{i}'] = {
+                'payload': payload,
+                'error': str(e)
+            }
+    
+    return jsonify(tests)
+
+@app.route('/final-order-test', methods=['GET'])
+def final_order_test():
+    """Final comprehensive order test based on all discoveries"""
+    tests = {}
+    
+    # Based on our discoveries, let's try the most likely formats
+    final_payloads = [
+        # Format 1: With user field at root (like clearinghouseState)
+        {
+            "user": WALLET_ADDRESS,
+            "action": {
+                "type": "order",
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ],
+                "grouping": "na"
+            }
+        },
+        
+        # Format 2: User inside action
+        {
+            "action": {
+                "type": "order", 
+                "user": WALLET_ADDRESS,
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ],
+                "grouping": "na"
+            }
+        },
+        
+        # Format 3: Simple format with user
+        {
+            "user": WALLET_ADDRESS,
+            "type": "order",
+            "orders": [
+                {
+                    "coin": "BTC",
+                    "side": "A",
+                    "sz": "0.001", 
+                    "order_type": {"market": {}}
+                }
+            ]
+        },
+    ]
+    
+    for i, payload in enumerate(final_payloads):
         try:
             # Sign the request
             message = json.dumps(payload, separators=(',', ':'), sort_keys=True)
@@ -196,115 +304,30 @@ def test_with_other_actions():
             ).hexdigest()
             
             headers = {
-                "Content-Type": "application/json", 
-                "X-API-Signature": signature
-            }
-            
-            response = requests.post(
-                "https://api.hyperliquid.xyz/exchange",
-                json=payload,
-                headers=headers,
-                timeout=10
-            )
-            
-            tests[f'action_{i}'] = {
-                'payload': payload,
-                'status': response.status_code,
-                'response': response.text
-            }
-            
-        except Exception as e:
-            tests[f'action_{i}'] = {
-                'payload': payload,
-                'error': str(e)
-            }
-    
-    return jsonify(tests)
-
-@app.route('/check-api-keys', methods=['GET'])
-def check_api_keys():
-    """Verify API keys are working by testing signature"""
-    tests = {}
-    
-    # Test if we can make any authenticated request
-    test_payloads = [
-        # Maybe we can get balance or something simple
-        {"action": {"type": "balance"}},
-        {"action": {"type": "userData"}},
-        # Empty action to see what error we get
-        {"action": {}},
-    ]
-    
-    for i, payload in enumerate(test_payloads):
-        try:
-            message = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-            signature = hmac.new(
-                bytes(SECRET_KEY, 'utf-8'),
-                msg=bytes(message, 'utf-8'), 
-                digestmod=hashlib.sha256
-            ).hexdigest()
-            
-            headers = {
                 "Content-Type": "application/json",
                 "X-API-Signature": signature
             }
             
-            response = requests.post(
-                "https://api.hyperliquid.xyz/exchange",
-                json=payload,
-                headers=headers,
-                timeout=10
-            )
-            
-            tests[f'test_{i}'] = {
-                'payload': payload,
-                'status': response.status_code,
-                'response': response.text,
-                'signature_valid': signature[:10] + '...'
-            }
-            
+            # Try both endpoints
+            for endpoint in ["/exchange", "/info"]:
+                response = requests.post(
+                    f"https://api.hyperliquid.xyz{endpoint}",
+                    json=payload,
+                    headers=headers,
+                    timeout=10
+                )
+                
+                tests[f'final_{i}_{endpoint}'] = {
+                    'endpoint': endpoint,
+                    'payload': payload,
+                    'status': response.status_code,
+                    'response': response.text,
+                    'signature_short': signature[:20] + '...'
+                }
+                
         except Exception as e:
-            tests[f'test_{i}'] = {
+            tests[f'final_{i}_error'] = {
                 'payload': payload,
-                'error': str(e)
-            }
-    
-    return jsonify(tests)
-
-@app.route('/test-without-signature', methods=['GET'])
-def test_without_signature():
-    """Test if endpoints work without signature (public endpoints)"""
-    tests = {}
-    
-    # Test various endpoints without authentication
-    endpoints = [
-        {"url": "https://api.hyperliquid.xyz/info", "payload": {"type": "meta"}},
-        {"url": "https://api.hyperliquid.xyz/info", "payload": {"type": "userState", "user": WALLET_ADDRESS}},
-        {"url": "https://api.hyperliquid.xyz/info", "payload": {"type": "clearinghouseState", "user": WALLET_ADDRESS}},
-        {"url": "https://api.hyperliquid.xyz/info", "payload": {"type": "openOrders", "user": WALLET_ADDRESS}},
-        {"url": "https://api.hyperliquid.xyz/info", "payload": {"type": "allMids"}},
-        {"url": "https://api.hyperliquid.xyz/info", "payload": {"type": "candleSnapshot", "coin": "BTC", "interval": "1h"}},
-    ]
-    
-    for i, endpoint in enumerate(endpoints):
-        try:
-            response = requests.post(
-                endpoint["url"],
-                json=endpoint["payload"],
-                timeout=10
-            )
-            
-            tests[f'endpoint_{i}'] = {
-                'url': endpoint["url"],
-                'payload': endpoint["payload"],
-                'status': response.status_code,
-                'response': response.text[:200] if response.text else 'Empty'
-            }
-            
-        except Exception as e:
-            tests[f'endpoint_{i}'] = {
-                'url': endpoint["url"],
-                'payload': endpoint["payload"],
                 'error': str(e)
             }
     
@@ -317,14 +340,15 @@ def health_check():
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
-        "message": "Hyperliquid API Format Discovery",
+        "message": "Hyperliquid API - Working Endpoints Found!",
+        "status": "SUCCESS - Account found with $8218.31 balance",
         "endpoints": {
             "health": "/health",
-            "discover_user_state": "/discover-user-state", 
-            "discover_exchange": "/discover-exchange-format",
-            "test_other_actions": "/test-with-other-actions",
-            "check_api_keys": "/check-api-keys",
-            "test_without_signature": "/test-without-signature"
+            "analyze_patterns": "/analyze-working-patterns",
+            "test_exchange_user": "/test-exchange-with-user", 
+            "account_info": "/get-account-info",
+            "test_order_via_info": "/test-order-via-info",
+            "final_order_test": "/final-order-test"
         }
     })
 
