@@ -49,16 +49,27 @@ def handle_webhook():
         
         print(f"Processing order: {side} {size} {symbol}")
         
+        # Try different symbol formats
+        symbol_variations = [symbol, f"{symbol}-PERP", f"{symbol}USD", f"{symbol}USDC"]
+        
         # Execute trade on Hyperliquid
         if side in ['buy', 'sell']:
+            # Try with original symbol first
             result = hl.order(symbol, side == 'buy', size, order_type)
             print(f"Hyperliquid response: {result}")
+            
+            # If original fails, try variations
+            if result.get('status') != 'success':
+                for symbol_var in symbol_variations[1:]:
+                    print(f"Trying symbol variation: {symbol_var}")
+                    result = hl.order(symbol_var, side == 'buy', size, order_type)
+                    if result.get('status') == 'success':
+                        break
             
             if result.get('status') == 'success':
                 return jsonify({
                     "status": "success", 
                     "message": f"Order executed: {side} {size} {symbol}",
-                    "order_id": result.get('order_id', 'N/A'),
                     "details": result.get('response', {})
                 })
             else:
