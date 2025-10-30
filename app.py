@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import hmac
 import hashlib
 import json
+import requests  # Add this import
 from hyperliquid import Hyperliquid
 import os
 from config import SECRET_KEY, WALLET_ADDRESS
@@ -37,10 +38,9 @@ def handle_webhook():
         symbol = data.get('symbol', 'BTC').upper()
         side = data.get('side', '').lower()
         size = float(data.get('size', 0.01))
-        order_type = data.get('order_type', 'limit')  # Change to limit for testing
-        limit_price = float(data.get('limit_price', 60000))  # Add a reasonable limit price
+        order_type = data.get('order_type', 'market')
         
-        print(f"Processing order: {side} {size} {symbol} at {limit_price}")
+        print(f"Processing order: {side} {size} {symbol}")
         
         # Get available coins to verify symbol
         available_coins = hl.get_available_coins()
@@ -54,13 +54,6 @@ def handle_webhook():
                 break
         
         if not target_coin:
-            # Try partial match
-            for coin in available_coins:
-                if symbol.upper() in coin.upper():
-                    target_coin = coin
-                    break
-        
-        if not target_coin:
             return jsonify({
                 "status": "error",
                 "message": f"Symbol '{symbol}' not found. Available coins: {available_coins}"
@@ -70,7 +63,7 @@ def handle_webhook():
         
         # Execute trade on Hyperliquid
         if side in ['buy', 'sell']:
-            result = hl.order(target_coin, side == 'buy', size, order_type, limit_price)
+            result = hl.order(target_coin, side == 'buy', size, order_type)
             print(f"Hyperliquid response: {result}")
             
             if result.get('status') == 'success':
@@ -105,21 +98,6 @@ def test_connection():
         return jsonify({
             "status": "success",
             "user_state": user_state,
-            "available_coins": available_coins
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
-
-@app.route('/symbols', methods=['GET'])
-def get_symbols():
-    """Get available trading symbols"""
-    try:
-        available_coins = hl.get_available_coins()
-        return jsonify({
-            "status": "success",
             "available_coins": available_coins
         })
     except Exception as e:
@@ -172,7 +150,48 @@ def test_order():
         return jsonify({
             "status": response.status_code,
             "response": response.text,
-            "test_payload": test_payload
+            "test_payload": test_payload,
+            "signature": signature
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/test-user-state', methods=['GET'])
+def test_user_state():
+    """Test user state endpoint specifically"""
+    try:
+        # Test user state with exact format
+        user_state_payload = {
+            "type": "userState",
+            "user": WALLET_ADDRESS
+        }
+        
+        print(f"Testing user state with: {user_state_payload}")
+        
+        signature = hmac.new(
+            bytes(SECRET_KEY, 'utf-8'),
+            msg=bytes(json.dumps(user_state_payload, separators=(',', ':'), sort_keys=True), 'utf-8'),
+            digestmod=hashlib.sha256
+        ).hexdigest()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Signature": signature
+        }
+        
+        response = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            json=user_state_payload,
+            headers=headers,
+            timeout=10
+        )
+        
+        return jsonify({
+            "status": response.status_code,
+            "response": response.text,
+            "headers_sent": dict(headers),
+            "payload": user_state_payload
         })
         
     except Exception as e:
@@ -185,7 +204,8 @@ def home():
         "endpoints": {
             "health": "/health",
             "test_connection": "/test",
-            "symbols": "/symbols",
+            "test_order": "/test-order (POST)", 
+            "test_user_state": "/test-user-state",
             "webhook": "/webhook (POST)"
         }
     })
