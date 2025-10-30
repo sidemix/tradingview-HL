@@ -237,6 +237,240 @@ def test_order_via_info():
     
     return jsonify(tests)
 
+@app.route('/test-official-format', methods=['GET'])
+def test_official_format():
+    """Test with format from official Hyperliquid documentation/examples"""
+    tests = {}
+    
+    # Based on common exchange API patterns and your working history
+    official_formats = [
+        # Format 1: Standard exchange format with timestamp
+        {
+            "timestamp": int(time.time() * 1000),
+            "action": {
+                "type": "order",
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ],
+                "grouping": "na"
+            }
+        },
+        
+        # Format 2: With nonce for replay protection
+        {
+            "nonce": int(time.time() * 1000),
+            "action": {
+                "type": "order", 
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ]
+            }
+        },
+        
+        # Format 3: Maybe they use completely different field names
+        {
+            "method": "private/order",
+            "params": {
+                "symbol": "BTC",
+                "side": "BUY",
+                "quantity": "0.001",
+                "type": "MARKET"
+            }
+        },
+        
+        # Format 4: Try with the exact format from userFills data structure
+        {
+            "type": "order",
+            "orders": [
+                {
+                    "a": "BTC",  # asset
+                    "b": True,   # is_buy
+                    "s": "0.001", # size  
+                    "t": {"market": {}}  # order_type
+                }
+            ]
+        },
+        
+        # Format 5: Single letter fields (common in some APIs)
+        {
+            "a": {
+                "t": "order",
+                "o": [
+                    {
+                        "a": "BTC",
+                        "b": True, 
+                        "s": "0.001",
+                        "t": {"market": {}}
+                    }
+                ],
+                "g": "na"
+            }
+        },
+    ]
+    
+    for i, payload in enumerate(official_formats):
+        try:
+            # Sign the request
+            message = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+            signature = hmac.new(
+                bytes(SECRET_KEY, 'utf-8'),
+                msg=bytes(message, 'utf-8'),
+                digestmod=hashlib.sha256
+            ).hexdigest()
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-API-Signature": signature,
+                # Try additional headers that might be required
+                "X-API-Timestamp": str(int(time.time() * 1000)),
+            }
+            
+            response = requests.post(
+                "https://api.hyperliquid.xyz/exchange",
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            
+            tests[f'official_{i}'] = {
+                'payload': payload,
+                'status': response.status_code,
+                'response': response.text,
+                'signature_short': signature[:20] + '...'
+            }
+            
+        except Exception as e:
+            tests[f'official_{i}'] = {
+                'payload': payload,
+                'error': str(e)
+            }
+    
+    return jsonify(tests)
+
+@app.route('/discover-other-endpoints', methods=['GET'])
+def discover_other_endpoints():
+    """Discover other potential endpoints"""
+    tests = {}
+    
+    endpoints_to_try = [
+        "/trade",
+        "/api/v1/order", 
+        "/api/order",
+        "/v1/order",
+        "/private/order",
+        "/exchange/order",
+        "/api/exchange/order",
+    ]
+    
+    base_url = "https://api.hyperliquid.xyz"
+    
+    for endpoint in endpoints_to_try:
+        try:
+            # Try simple GET first
+            response = requests.get(f"{base_url}{endpoint}", timeout=5)
+            tests[f'get_{endpoint}'] = {
+                'method': 'GET',
+                'status': response.status_code,
+                'response': response.text[:100] if response.text else 'Empty'
+            }
+            
+            # Try POST with basic payload
+            test_payload = {"test": True}
+            response = requests.post(f"{base_url}{endpoint}", json=test_payload, timeout=5)
+            tests[f'post_{endpoint}'] = {
+                'method': 'POST', 
+                'status': response.status_code,
+                'response': response.text[:100] if response.text else 'Empty'
+            }
+            
+        except Exception as e:
+            tests[f'error_{endpoint}'] = {
+                'error': str(e)
+            }
+    
+    return jsonify(tests)
+
+@app.route('/verify-api-key-setup', methods=['GET'])
+def verify_api_key_setup():
+    """Verify API key was created with correct permissions"""
+    tests = {}
+    
+    # The API key might need specific permissions
+    # Common issue: API key created without order permissions
+    
+    # Test if we can get any user-specific data that requires the key
+    try:
+        # Try to get user state with signature (maybe it requires auth)
+        user_state_payload = {
+            "type": "userState",
+            "user": WALLET_ADDRESS
+        }
+        
+        message = json.dumps(user_state_payload, separators=(',', ':'), sort_keys=True)
+        signature = hmac.new(
+            bytes(SECRET_KEY, 'utf-8'),
+            msg=bytes(message, 'utf-8'),
+            digestmod=hashlib.sha256
+        ).hexdigest()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Signature": signature
+        }
+        
+        response = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            json=user_state_payload,
+            headers=headers,
+            timeout=10
+        )
+        
+        tests['user_state_with_auth'] = {
+            'status': response.status_code,
+            'response': response.text
+        }
+        
+    except Exception as e:
+        tests['user_state_with_auth_error'] = str(e)
+    
+    return jsonify(tests)
+
+@app.route('/check-for-sdk', methods=['GET'])
+def check_for_sdk():
+    """Check if there's an official SDK we should use"""
+    info = {
+        "suggestion": "Since we can't discover the correct API format through testing, we should:",
+        "options": [
+            "1. Check Hyperliquid's official GitHub for examples",
+            "2. Look for an official Python SDK", 
+            "3. Check their documentation for the exact order format",
+            "4. Contact their support for API documentation"
+        ],
+        "current_status": {
+            "account_working": True,
+            "balance": "$8,210.00", 
+            "has_trading_history": True,
+            "api_format_unknown": True
+        },
+        "next_steps": [
+            "Visit: https://github.com/hyperliquid-xyz",
+            "Check: https://hyperliquid.gitbook.io/hyperliquid-docs/",
+            "Look for API examples in their documentation"
+        ]
+    }
+    
+    return jsonify(info)
+
 @app.route('/final-order-test', methods=['GET'])
 def final_order_test():
     """Final comprehensive order test based on all discoveries"""
