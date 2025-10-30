@@ -11,6 +11,14 @@ app = Flask(__name__)
 # Initialize Hyperliquid client
 hl = Hyperliquid(WALLET_ADDRESS, SECRET_KEY)
 
+def verify_tradingview_webhook(data, signature):
+    """
+    Verify the webhook came from TradingView
+    You can add your own secret verification here
+    """
+    # Implement your verification logic here if you set WEBHOOK_SECRET
+    return True
+
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     try:
@@ -46,12 +54,12 @@ def handle_webhook():
             result = hl.order(symbol, side == 'buy', size, order_type)
             print(f"Hyperliquid response: {result}")
             
-            # Handle different response formats
-            if result.get('status') == 'ok' or 'response' in result:
+            if result.get('status') == 'success':
                 return jsonify({
                     "status": "success", 
                     "message": f"Order executed: {side} {size} {symbol}",
-                    "details": result
+                    "order_id": result.get('order_id', 'N/A'),
+                    "details": result.get('response', {})
                 })
             else:
                 error_msg = result.get('error', 'Unknown error from Hyperliquid')
@@ -69,6 +77,32 @@ def handle_webhook():
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"})
+
+@app.route('/test', methods=['GET'])
+def test_connection():
+    """Test Hyperliquid connection"""
+    try:
+        user_state = hl.get_user_state()
+        return jsonify({
+            "status": "success",
+            "user_state": user_state
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "TradingView to Hyperliquid Webhook",
+        "endpoints": {
+            "health": "/health",
+            "webhook": "/webhook (POST)",
+            "test": "/test"
+        }
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
