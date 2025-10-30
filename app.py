@@ -54,6 +54,40 @@ def handle_webhook():
         print(f"Error processing webhook: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/test-limit-order', methods=['POST'])
+def test_limit_order():
+    """Test limit order placement (might work better than market orders)"""
+    try:
+        # Test with a limit order far from current price (safe test)
+        result = hl.order('BTC', True, 0.001, 'limit', 10000)  # Very low price
+        
+        return jsonify({
+            "status": "test_complete",
+            "order_type": "limit",
+            "result": result,
+            "message": "Tested LIMIT order with CORRECT Hyperliquid API format"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/test-exact-format', methods=['POST'])
+def test_exact_format():
+    """Test with exact format from TypeScript SDK"""
+    try:
+        # Test with the exact format method
+        result = hl.order_exact_format('BTC', True, 0.001, 'market')
+        
+        return jsonify({
+            "status": "test_complete", 
+            "method": "exact_typescript_format",
+            "result": result,
+            "message": "Tested with EXACT TypeScript SDK format"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/test-order', methods=['POST'])
 def test_order():
     """Test order placement with CORRECT API format"""
