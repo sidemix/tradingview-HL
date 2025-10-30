@@ -1,9 +1,14 @@
 from flask import Flask, request, jsonify
 import logging
 import os
-from hyperliquid.exchange import Exchange
-from hyperliquid.info import Info
-from hyperliquid.utils import constants
+import requests
+import json
+import time
+import hmac
+import hashlib
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -15,61 +20,102 @@ class HyperliquidTrader:
         self.account_address = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS")
         self.secret_key = os.getenv("HYPERLIQUID_SECRET_KEY")
         
-        logger.info(f"Credentials check - Address: {self.account_address}, Secret set: {bool(self.secret_key)}")
+        self.base_url = "https://api.hyperliquid-testnet.xyz" if self.use_testnet else "https://api.hyperliquid.xyz"
+        self.info_url = f"{self.base_url}/info"
+        self.exchange_url = f"{self.base_url}/exchange"
+        
+        logger.info(f"Initializing Hyperliquid - Address: {self.account_address}, Network: {'testnet' if self.use_testnet else 'mainnet'}")
         
         if not self.account_address or not self.secret_key:
             logger.warning("Hyperliquid credentials not set - running in demo mode")
-            self.exchange = None
-            self.info = None
+            self.initialized = False
             return
         
         try:
-            base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
-            logger.info(f"Initializing with base_url: {base_url}")
+            # Test connection by getting user state
+            user_state = self._info_request({
+                "type": "clearinghouseState",
+                "user": self.account_address
+            })
             
-            # Initialize Info first
-            self.info = Info(base_url, skip_ws=True)
-            
-            # SIMPLE Exchange initialization - let the SDK handle it
-            self.exchange = Exchange(
-                self.account_address,
-                self.secret_key,
-                base_url=base_url
-            )
-            
-            # Test by getting user state
-            user_state = self.info.user_state(self.account_address)
-            logger.info(f"User state retrieved: {user_state}")
-            
-            logger.info("✅ Hyperliquid initialized successfully!")
-            
+            if "assetPositions" in user_state:
+                balance = user_state.get("withdrawable", 0)
+                logger.info(f"✅ Hyperliquid initialized successfully! Balance: {balance}")
+                self.initialized = True
+            else:
+                logger.error("❌ Failed to get user state - account may not be initialized")
+                self.initialized = False
+                
         except Exception as e:
             logger.error(f"❌ Failed to initialize Hyperliquid: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            self.exchange = None
-            self.info = None
+            self.initialized = False
 
-    def place_market_order(self, coin: str, is_buy: bool, size: float):
-        if not self.exchange:
-            raise Exception("Hyperliquid not configured")
+    def _generate_signature(self, data: dict) -> str:
+        """Generate signature for exchange requests"""
+        message = json.dumps(data, separators=(',', ':'), sort_keys=True)
+        return hmac.new(
+            self.secret_key.encode('utf-8'),
+            message.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+    def _info_request(self, data: dict) -> dict:
+        """Make info endpoint request"""
+        response = requests.post(self.info_url, json=data)
+        return response.json()
+
+    def _exchange_request(self, action: dict) -> dict:
+        """Make exchange endpoint request with signing"""
+        nonce = int(time.time() * 1000)
         
-        try:
-            # Market order with limit_px=0
-            result = self.exchange.order(coin, is_buy, size, 0, {"limit": {"tif": "Gtc"}})
-            logger.info(f"Order result: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"Order failed: {e}")
-            raise
+        request_data = {
+            "action": action,
+            "nonce": nonce,
+            "signature": self._generate_signature(action)
+        }
+        
+        response = requests.post(self.exchange_url, json=request_data)
+        return response.json()
 
-    def get_balance(self):
-        if not self.info:
-            return 0
+    def get_asset_index(self, coin: str) -> int:
+        """Get asset index for a coin"""
+        meta = self._info_request({"type": "meta"})
+        for i, asset in enumerate(meta["universe"]):
+            if asset["name"] == coin.upper():
+                return i
+        raise ValueError(f"Coin {coin} not found")
+
+    def place_market_order(self, coin: str, is_buy: bool, size: float) -> dict:
+        """Place market order using direct API"""
+        asset_index = self.get_asset_index(coin)
+        
+        order_action = {
+            "type": "order",
+            "orders": [
+                {
+                    "a": asset_index,        # asset index
+                    "b": is_buy,             # isBuy
+                    "p": "0",                # price (0 for market)
+                    "s": str(size),          # size
+                    "r": False,              # reduceOnly
+                    "t": {"limit": {"tif": "Gtc"}}  # order type
+                }
+            ],
+            "grouping": "na"
+        }
+        
+        logger.info(f"Placing market order: {coin} {'BUY' if is_buy else 'SELL'} {size}")
+        return self._exchange_request(order_action)
+
+    def get_balance(self) -> float:
+        """Get account balance"""
         try:
-            user_state = self.info.user_state(self.account_address)
+            user_state = self._info_request({
+                "type": "clearinghouseState",
+                "user": self.account_address
+            })
             return float(user_state.get("withdrawable", 0))
-        except Exception as e:
-            logger.error(f"Balance check failed: {e}")
+        except:
             return 0
 
 # Initialize trader
@@ -84,18 +130,18 @@ def tradingview_webhook():
             
         logger.info(f"Received TradingView alert: {data}")
         
+        # Parse alert
         symbol = data.get('symbol', 'BTC').upper()
         action = data.get('action', 'buy').lower()
         quantity = float(data.get('quantity', 0.001))
         
         is_buy = action in ['buy', 'long']
         
-        if trader.exchange is None:
+        if not trader.initialized:
             return jsonify({
                 "status": "demo",
                 "message": f"Alert received: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
-                "credentials_provided": True,
-                "note": "Exchange initialization issue - check deployment logs"
+                "note": "Hyperliquid not initialized - check credentials and logs"
             }), 200
         
         # Execute trade
@@ -113,7 +159,7 @@ def tradingview_webhook():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    trading_status = "active" if trader.exchange else "demo"
+    trading_status = "active" if trader.initialized else "demo"
     balance = trader.get_balance()
     
     return jsonify({
@@ -131,7 +177,8 @@ def home():
         "endpoints": {
             "health": "/health (GET)",
             "webhook": "/webhook/tradingview (POST)"
-        }
+        },
+        "implementation": "Direct API (no SDK)"
     }), 200
 
 if __name__ == '__main__':
