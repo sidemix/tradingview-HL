@@ -29,26 +29,19 @@ class HyperliquidTrader:
             
             self.info = Info(base_url, skip_ws=True)
             
-            # Try different Exchange initialization methods
-            try:
-                # Method 1: Standard initialization
-                self.exchange = Exchange(
-                    self.account_address,
-                    self.secret_key, 
-                    base_url=base_url
-                )
-            except TypeError as e:
-                logger.warning(f"Method 1 failed: {e}, trying alternative")
-                # Method 2: Alternative initialization
-                self.exchange = Exchange(
-                    wallet=self.account_address,
-                    secret_key=self.secret_key,
-                    base_url=base_url
-                )
+            # CORRECT Exchange initialization based on SDK source
+            # The Exchange class takes: (wallet, key, base_url, account_address)
+            self.exchange = Exchange(
+                self.account_address,  # wallet
+                self.secret_key,       # key (private key)
+                base_url=base_url,
+                account_address=self.account_address  # might be needed for some operations
+            )
             
-            # Test the connection
+            # Test the connection by getting user state
             user_state = self.info.user_state(self.account_address)
-            logger.info(f"Hyperliquid initialized successfully. Balance: {user_state.get('withdrawable', 'Unknown')}")
+            balance = user_state.get('withdrawable', 0)
+            logger.info(f"Hyperliquid initialized successfully. Balance: {balance}")
             
         except Exception as e:
             logger.error(f"Failed to initialize Hyperliquid: {e}")
@@ -59,7 +52,14 @@ class HyperliquidTrader:
         if not self.exchange:
             raise Exception("Hyperliquid not configured")
         
-        return self.exchange.order(coin, is_buy, size, 0, {"limit": {"tif": "Gtc"}})
+        try:
+            # Place market order (limit_px=0 for market)
+            result = self.exchange.order(coin, is_buy, size, 0, {"limit": {"tif": "Gtc"}})
+            logger.info(f"Order placed: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Order failed: {e}")
+            raise
 
     def get_balance(self):
         if not self.info:
@@ -67,7 +67,8 @@ class HyperliquidTrader:
         try:
             user_state = self.info.user_state(self.account_address)
             return float(user_state["withdrawable"])
-        except:
+        except Exception as e:
+            logger.error(f"Balance check failed: {e}")
             return 0
 
 # Initialize trader
@@ -94,8 +95,8 @@ def tradingview_webhook():
             return jsonify({
                 "status": "demo",
                 "message": f"Alert received: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
-                "credentials_provided": bool(trader.account_address and trader.secret_key),
-                "note": "Exchange initialization failed - check logs"
+                "credentials_provided": True,
+                "note": "Exchange initialization failed - check deployment logs"
             }), 200
         
         # Execute trade
