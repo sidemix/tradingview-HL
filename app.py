@@ -1,18 +1,18 @@
 from flask import Flask, request, jsonify
 import json
 import os
-from hyperliquid import HyperliquidBot
+from hyperliquid import HyperliquidDirect
 from config import SECRET_KEY, WALLET_ADDRESS
 
 app = Flask(__name__)
 
-# Initialize Hyperliquid client with official SDK
-hl = HyperliquidBot(WALLET_ADDRESS, SECRET_KEY, is_testnet=False)
+# Initialize Hyperliquid client with CORRECT API format
+hl = HyperliquidDirect(WALLET_ADDRESS, SECRET_KEY)
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     """
-    TradingView webhook endpoint - NOW WORKING WITH OFFICIAL SDK
+    TradingView webhook endpoint - NOW WITH CORRECT API FORMAT
     """
     try:
         data = request.get_json()
@@ -30,7 +30,7 @@ def handle_webhook():
         
         print(f"Processing order: {side} {size} {symbol} {order_type}")
         
-        # Execute trade using official SDK
+        # Execute trade with CORRECT API format
         if side in ['buy', 'sell']:
             result = hl.order(symbol, side == 'buy', size, order_type)
             print(f"Hyperliquid response: {result}")
@@ -54,17 +54,17 @@ def handle_webhook():
         print(f"Error processing webhook: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/test-sdk-order', methods=['POST'])
-def test_sdk_order():
-    """Test order placement with official SDK"""
+@app.route('/test-order', methods=['POST'])
+def test_order():
+    """Test order placement with CORRECT API format"""
     try:
         # Test with a small market order
         result = hl.order('BTC', True, 0.001, 'market')
         
         return jsonify({
-            "status": "sdk_test_complete",
+            "status": "test_complete",
             "result": result,
-            "message": "Tested order with official Hyperliquid SDK"
+            "message": "Tested order with CORRECT Hyperliquid API format"
         })
         
     except Exception as e:
@@ -80,7 +80,7 @@ def get_meta():
         return jsonify({
             "status": "success",
             "available_coins": coins,
-            "meta": meta
+            "meta_sample": meta['universe'][:3] if 'universe' in meta else []
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -100,6 +100,30 @@ def get_account_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/debug-order', methods=['POST'])
+def debug_order():
+    """Debug order with detailed logging"""
+    try:
+        test_data = {
+            "symbol": "BTC",
+            "side": "buy", 
+            "size": 0.001,
+            "order_type": "market"
+        }
+        
+        print("=== DEBUG ORDER START ===")
+        result = hl.order('BTC', True, 0.001, 'market')
+        print("=== DEBUG ORDER END ===")
+        
+        return jsonify({
+            "status": "debug_complete",
+            "test_data": test_data,
+            "result": result
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"})
@@ -108,12 +132,19 @@ def health_check():
 def home():
     return jsonify({
         "status": "READY",
-        "message": "TradingView to Hyperliquid Webhook - USING OFFICIAL SDK",
-        "setup": "Now using official Hyperliquid Python SDK",
+        "message": "TradingView to Hyperliquid Webhook - CORRECT API FORMAT",
+        "breakthrough": "Found official API documentation with required nonce field",
+        "key_changes": [
+            "Added required 'nonce' field (timestamp in ms)",
+            "Using asset indices instead of coin names", 
+            "Correct single-letter field names (a, b, s, p, r, t)",
+            "Proper signature covering complete payload"
+        ],
         "endpoints": {
             "health": "/health",
             "webhook": "/webhook (POST) - for TradingView",
-            "test_sdk": "/test-sdk-order (POST)",
+            "test_order": "/test-order (POST)",
+            "debug_order": "/debug-order (POST)",
             "meta": "/get-meta",
             "account": "/get-account-info"
         }
