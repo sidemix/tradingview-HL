@@ -12,9 +12,9 @@ class Hyperliquid:
         
     def order(self, coin, is_buy, sz, order_type="market", limit_px=0):
         """
-        Place an order using Hyperliquid API
+        Place an order using Hyperliquid API - CORRECTED FORMAT
         """
-        # Correct order format based on Hyperliquid API docs
+        # Correct order format based on Hyperliquid API documentation
         order_payload = {
             "action": {
                 "type": "order",
@@ -26,7 +26,8 @@ class Hyperliquid:
                         "limit_px": str(limit_px),
                         "order_type": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
                     }
-                ]
+                ],
+                "grouping": "na"  # Important: required field
             }
         }
         
@@ -92,6 +93,22 @@ class Hyperliquid:
                 f"{self.base_url}/info",
                 json=info_payload,
                 headers=headers,
+                timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_exchange_info(self):
+        """Get exchange info to verify symbols"""
+        info_payload = {
+            "type": "meta"
+        }
+        
+        try:
+            response = requests.post(
+                f"{self.base_url}/info",
+                json=info_payload,
                 timeout=10
             )
             return response.json()
