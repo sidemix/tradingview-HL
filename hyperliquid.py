@@ -92,6 +92,99 @@ class HyperliquidDirect:
                 
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+        def order_exact_format(self, coin, is_buy, sz, order_type="market", limit_px=0):
+        """
+        Place order using EXACT format from TypeScript SDK examples
+        """
+        try:
+            # Get asset index
+            meta_response = requests.post(f"{self.base_url}/info", json={"type": "meta"})
+            if meta_response.status_code != 200:
+                return {"status": "error", "error": f"Failed to get meta: {meta_response.text}"}
+                
+            meta = meta_response.json()
+            asset_index = None
+            
+            for i, asset in enumerate(meta['universe']):
+                if asset['name'] == coin:
+                    asset_index = i
+                    break
+            
+            if asset_index is None:
+                return {"status": "error", "error": f"Asset {coin} not found"}
+            
+            print(f"Found asset index: {asset_index} for {coin}")
+            
+            # Create order in EXACT format from TypeScript SDK
+            if order_type == "market":
+                order_data = {
+                    "a": asset_index,
+                    "b": is_buy,
+                    "s": str(sz),
+                    "r": False,
+                    "t": {"market": {}}  # No price for market orders
+                }
+            else:
+                order_data = {
+                    "a": asset_index,
+                    "b": is_buy, 
+                    "s": str(sz),
+                    "p": str(limit_px),
+                    "r": False,
+                    "t": {"limit": {"tif": "Gtc"}}
+                }
+            
+            # Complete payload
+            order_payload = {
+                "action": {
+                    "type": "order",
+                    "orders": [order_data],
+                    "grouping": "na"
+                },
+                "nonce": int(time.time() * 1000),
+                "signature": "placeholder"  # Will be replaced
+            }
+            
+            # Remove signature before signing
+            payload_to_sign = order_payload.copy()
+            del payload_to_sign["signature"]
+            
+            # Sign the payload
+            signature = self._sign_request(payload_to_sign)
+            order_payload["signature"] = signature
+            
+            print(f"Sending EXACT format order: {json.dumps(order_payload, indent=2)}")
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-API-Signature": signature
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/exchange",
+                json=order_payload,
+                headers=headers,
+                timeout=10
+            )
+            
+            print(f"Response status: {response.status_code}")
+            print(f"Response text: {response.text}")
+            
+            if response.status_code == 200:
+                try:
+                    response_data = response.json()
+                    if response_data.get("status") == "ok":
+                        return {"status": "success", "response": response_data}
+                    else:
+                        return {"status": "error", "error": response_data}
+                except Exception as e:
+                    return {"status": "error", "error": f"Invalid JSON: {response.text}"}
+            else:
+                return {"status": "error", "error": f"HTTP {response.status_code}: {response.text}"}
+                
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
     
     def _sign_request(self, data):
         """
