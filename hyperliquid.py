@@ -33,20 +33,26 @@ class HyperliquidDirect:
             
             print(f"Found asset index: {asset_index} for {coin}")
             
-            # Create order in CORRECT format from documentation
+            # Create base order without price for market orders
+            order_data = {
+                "a": asset_index,        # asset index
+                "b": is_buy,             # is_buy (boolean)
+                "s": str(sz),            # size (string)
+                "r": False,              # reduce_only
+            }
+            
+            # Add order type specific fields
+            if order_type == "market":
+                order_data["t"] = {"market": {}}  # No price for market orders
+            else:
+                order_data["t"] = {"limit": {"tif": "Gtc"}}
+                order_data["p"] = str(limit_px)   # Only add price for limit orders
+            
+            # Create the complete payload
             order_payload = {
                 "action": {
                     "type": "order",
-                    "orders": [
-                        {
-                            "a": asset_index,        # asset index
-                            "b": is_buy,             # is_buy (boolean)
-                            "s": str(sz),            # size (string)
-                            "p": str(limit_px) if order_type == "limit" else "0",  # price
-                            "r": False,              # reduce_only
-                            "t": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
-                        }
-                    ],
+                    "orders": [order_data],
                     "grouping": "na"
                 },
                 "nonce": int(time.time() * 1000)  # REQUIRED: current timestamp in milliseconds
