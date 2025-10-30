@@ -51,22 +51,62 @@ class HyperliquidTrader:
             self.initialized = False
 
     def _generate_signature(self, data: dict) -> dict:
-        """Generate signature in the exact format Hyperliquid expects"""
-        # Hyperliquid expects the signature to be an object with r, s, v fields
-        message = json.dumps(data, separators=(',', ':'), sort_keys=True)
-        signature_hash = hmac.new(
-            self.secret_key.encode('utf-8'),
-            message.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        # Convert to the expected signature format
-        # For now, we'll use a simplified version - might need ECDSA for proper v, r, s
-        return {
-            "r": f"0x{signature_hash[:64]}",
-            "s": f"0x{signature_hash[64:128]}", 
-            "v": 27  # Typical Ethereum v value
-        }
+        """Generate proper ECDSA signature for Hyperliquid"""
+        try:
+            # Import here to avoid dependency issues
+            from ecdsa import SigningKey, SECP256k1
+            import ecdsa
+            
+            # Remove '0x' prefix if present
+            private_key_hex = self.secret_key[2:] if self.secret_key.startswith('0x') else self.secret_key
+            
+            # Convert private key to bytes
+            private_key_bytes = bytes.fromhex(private_key_hex)
+            
+            # Create signing key
+            sk = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
+            
+            # Serialize the data exactly as Hyperliquid expects
+            message = json.dumps(data, separators=(',', ':'), sort_keys=True)
+            logger.info(f"Signing message: {message}")
+            
+            # Hash the message
+            message_hash = hashlib.sha256(message.encode()).digest()
+            
+            # Sign the message
+            signature = sk.sign_digest(message_hash, sigencode=ecdsa.util.sigencode_der)
+            
+            # Parse the DER-encoded signature to get r and s
+            # This is a simplified approach - for production use a proper DER parser
+            r = signature[4:36]  # Skip DER header
+            s = signature[38:70] # Skip DER header and length bytes
+            
+            r_hex = r.hex()
+            s_hex = s.hex()
+            
+            signature_obj = {
+                "r": f"0x{r_hex}",
+                "s": f"0x{s_hex}",
+                "v": 27  # Standard Ethereum v value
+            }
+            
+            logger.info(f"Generated signature: {signature_obj}")
+            return signature_obj
+            
+        except Exception as e:
+            logger.error(f"Signature generation failed: {e}")
+            # Fallback to simple HMAC (won't work but helps debugging)
+            message = json.dumps(data, separators=(',', ':'), sort_keys=True)
+            fallback_hash = hmac.new(
+                self.secret_key.encode('utf-8'),
+                message.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            return {
+                "r": f"0x{fallback_hash[:64]}",
+                "s": f"0x{fallback_hash[64:128]}",
+                "v": 27
+            }
 
     def _info_request(self, data: dict) -> dict:
         """Make info endpoint request"""
@@ -86,7 +126,7 @@ class HyperliquidTrader:
             "signature": signature
         }
         
-        logger.info(f"Sending exchange request: {json.dumps(request_data, indent=2)}")
+        logger.info(f"Sending exchange request...")
         
         headers = {
             "Content-Type": "application/json"
@@ -94,10 +134,8 @@ class HyperliquidTrader:
         
         response = requests.post(self.exchange_url, json=request_data, headers=headers)
         
-        # Better error handling for response
         logger.info(f"Response status: {response.status_code}")
-        logger.info(f"Response headers: {response.headers}")
-        logger.info(f"Response text: {response.text}")
+        logger.info(f"Response text: {response.text[:200]}...")  # First 200 chars
         
         try:
             response_data = response.json()
@@ -220,7 +258,7 @@ def home():
             "health": "/health (GET)",
             "webhook": "/webhook/tradingview (POST)"
         },
-        "status": "ACTIVE - Ready for TradingView alerts!"
+        "status": "ACTIVE - Testing signature generation"
     }), 200
 
 if __name__ == '__main__':
