@@ -114,7 +114,7 @@ class Hyperliquid:
             "user": self.wallet_address
         }
         
-        # Don't sign user state requests - they are public info endpoints
+        # Info endpoints don't need signatures
         try:
             response = requests.post(
                 f"{self.base_url}/info",
