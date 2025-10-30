@@ -12,21 +12,26 @@ class Hyperliquid:
         
     def order(self, coin, is_buy, sz, order_type="market", limit_px=0):
         """
-        Place an order using Hyperliquid API - CORRECT FORMAT
+        Place an order using Hyperliquid API - EXACT CORRECT FORMAT
         """
-        # Create the base order structure
-        order = {
-            "coin": coin,
-            "side": "A" if is_buy else "B",
-            "sz": str(sz),
-            "order_type": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
-        }
+        # Create order based on type - using exact format from Hyperliquid docs
+        if order_type == "market":
+            order = {
+                "coin": coin,
+                "side": "A" if is_buy else "B",
+                "sz": str(sz),
+                "order_type": {"market": {}}
+            }
+        else:
+            order = {
+                "coin": coin,
+                "side": "A" if is_buy else "B", 
+                "sz": str(sz),
+                "limit_px": str(limit_px),
+                "order_type": {"limit": {"tif": "Gtc"}}
+            }
         
-        # Only add limit_px for limit orders
-        if order_type == "limit":
-            order["limit_px"] = str(limit_px)
-        
-        # CORRECT order format from Hyperliquid documentation
+        # The exact payload structure from Hyperliquid documentation
         order_payload = {
             "action": {
                 "type": "order",
@@ -63,7 +68,7 @@ class Hyperliquid:
                     if response_data.get("status") == "ok":
                         return {"status": "success", "response": response_data}
                     else:
-                        return {"status": "error", "error": response_data}
+                        return {"status": "error", "error": response_data.get("response", response_data)}
                 except Exception as e:
                     return {"status": "error", "error": f"JSON parse error: {str(e)}"}
             else:
