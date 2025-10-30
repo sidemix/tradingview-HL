@@ -128,6 +128,56 @@ def get_symbols():
             "error": str(e)
         }), 500
 
+@app.route('/test-order', methods=['POST'])
+def test_order():
+    """Test order with exact format"""
+    try:
+        # Test with a simple market order
+        test_payload = {
+            "action": {
+                "type": "order", 
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ],
+                "grouping": "na"
+            }
+        }
+        
+        print(f"Testing with payload: {json.dumps(test_payload, indent=2)}")
+        
+        # Sign the test payload
+        signature = hmac.new(
+            bytes(SECRET_KEY, 'utf-8'),
+            msg=bytes(json.dumps(test_payload, separators=(',', ':'), sort_keys=True), 'utf-8'),
+            digestmod=hashlib.sha256
+        ).hexdigest()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Signature": signature
+        }
+        
+        response = requests.post(
+            "https://api.hyperliquid.xyz/exchange",
+            json=test_payload,
+            headers=headers,
+            timeout=10
+        )
+        
+        return jsonify({
+            "status": response.status_code,
+            "response": response.text,
+            "test_payload": test_payload
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
