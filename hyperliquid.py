@@ -1,8 +1,8 @@
 import requests
-import time
 import hmac
 import hashlib
 import json
+import time
 
 class Hyperliquid:
     def __init__(self, wallet_address, secret_key, base_url="https://api.hyperliquid.xyz"):
@@ -12,30 +12,29 @@ class Hyperliquid:
         
     def order(self, coin, is_buy, sz, order_type="market", limit_price=0):
         """
-        Place an order on Hyperliquid
+        Place an order on Hyperliquid using correct API format
         """
-        endpoint = "/exchange"
-        
-        # Prepare order data - CORRECTED FORMAT
-        order_data = {
+        # Hyperliquid expects specific format
+        order_payload = {
             "action": {
                 "type": "order",
                 "orders": [
                     {
-                        "coin": coin,
-                        "is_buy": is_buy,
-                        "sz": str(sz),
-                        "limit_px": str(limit_price),
-                        "order_type": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
+                        "a": coin,  # asset
+                        "b": is_buy,  # is buy
+                        "p": str(limit_price),  # price
+                        "s": str(sz),  # size
+                        "r": True,  # reduce only
+                        "t": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
                     }
                 ]
             }
         }
         
-        print(f"Sending order to Hyperliquid: {json.dumps(order_data, indent=2)}")
+        print(f"Sending order to Hyperliquid: {json.dumps(order_payload, indent=2)}")
         
         # Generate signature
-        signature = self._sign_request(order_data)
+        signature = self._sign_request(order_payload)
         
         headers = {
             "Content-Type": "application/json",
@@ -44,29 +43,25 @@ class Hyperliquid:
         
         try:
             response = requests.post(
-                f"{self.base_url}{endpoint}",
-                json=order_data,
+                f"{self.base_url}/exchange",
+                json=order_payload,
                 headers=headers,
                 timeout=10
             )
             print(f"Hyperliquid API response status: {response.status_code}")
-            print(f"Hyperliquid API response headers: {dict(response.headers)}")
             print(f"Hyperliquid API response text: {response.text}")
             
-            # Handle empty responses
-            if response.status_code == 200 and response.text.strip():
-                return response.json()
-            elif response.status_code == 200:
-                return {"status": "ok", "message": "Order placed successfully (empty response)"}
+            if response.status_code == 200:
+                try:
+                    return response.json()
+                except:
+                    return {"status": "ok", "response": response.text}
             else:
                 return {"status": "error", "error": f"HTTP {response.status_code}: {response.text}"}
                 
         except requests.exceptions.RequestException as e:
             print(f"Request error: {str(e)}")
             return {"status": "error", "error": f"Request failed: {str(e)}"}
-        except json.JSONDecodeError as e:
-            print(f"JSON decode error: {str(e)}")
-            return {"status": "error", "error": f"Invalid response from Hyperliquid: {response.text}"}
     
     def _sign_request(self, data):
         """
@@ -79,18 +74,16 @@ class Hyperliquid:
             msg=bytes(message, 'utf-8'),
             digestmod=hashlib.sha256
         ).hexdigest()
-        print(f"Generated signature: {signature}")
         return signature
 
     def get_user_state(self):
         """Get user state to verify API connection"""
-        endpoint = "/info"
-        data = {
+        info_payload = {
             "type": "userState",
             "user": self.wallet_address
         }
         
-        signature = self._sign_request(data)
+        signature = self._sign_request(info_payload)
         headers = {
             "Content-Type": "application/json", 
             "X-API-Signature": signature
@@ -98,8 +91,8 @@ class Hyperliquid:
         
         try:
             response = requests.post(
-                f"{self.base_url}{endpoint}",
-                json=data,
+                f"{self.base_url}/info",
+                json=info_payload,
                 headers=headers,
                 timeout=10
             )
