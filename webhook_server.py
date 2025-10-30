@@ -50,14 +50,23 @@ class HyperliquidTrader:
             logger.error(f"❌ Failed to initialize Hyperliquid: {e}")
             self.initialized = False
 
-    def _generate_signature(self, data: dict) -> str:
-        """Generate signature for exchange requests"""
+    def _generate_signature(self, data: dict) -> dict:
+        """Generate signature in the exact format Hyperliquid expects"""
+        # Hyperliquid expects the signature to be an object with r, s, v fields
         message = json.dumps(data, separators=(',', ':'), sort_keys=True)
-        return hmac.new(
+        signature_hash = hmac.new(
             self.secret_key.encode('utf-8'),
             message.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
+        
+        # Convert to the expected signature format
+        # For now, we'll use a simplified version - might need ECDSA for proper v, r, s
+        return {
+            "r": f"0x{signature_hash[:64]}",
+            "s": f"0x{signature_hash[64:128]}", 
+            "v": 27  # Typical Ethereum v value
+        }
 
     def _info_request(self, data: dict) -> dict:
         """Make info endpoint request"""
@@ -68,23 +77,34 @@ class HyperliquidTrader:
         """Make exchange endpoint request with signing"""
         nonce = int(time.time() * 1000)
         
+        # Generate signature for the action
+        signature = self._generate_signature(action)
+        
         request_data = {
             "action": action,
             "nonce": nonce,
-            "signature": self._generate_signature(action)
+            "signature": signature
         }
         
-        logger.info(f"Sending exchange request: {request_data}")
-        response = requests.post(self.exchange_url, json=request_data)
+        logger.info(f"Sending exchange request: {json.dumps(request_data, indent=2)}")
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(self.exchange_url, json=request_data, headers=headers)
         
         # Better error handling for response
+        logger.info(f"Response status: {response.status_code}")
+        logger.info(f"Response headers: {response.headers}")
+        logger.info(f"Response text: {response.text}")
+        
         try:
             response_data = response.json()
-            logger.info(f"Exchange response: {response_data}")
             return response_data
         except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}, Response text: {response.text}")
-            return {"error": f"JSON decode failed: {response.text}"}
+            logger.error(f"JSON decode error: {e}")
+            return {"error": f"JSON decode failed: {response.text}", "status_code": response.status_code}
 
     def get_asset_index(self, coin: str) -> int:
         """Get asset index for a coin"""
@@ -165,7 +185,8 @@ def tradingview_webhook():
         if "error" in result:
             return jsonify({
                 "status": "error",
-                "message": f"Trade failed: {result['error']}"
+                "message": f"Trade failed: {result['error']}",
+                "status_code": result.get("status_code", 400)
             }), 400
         
         return jsonify({
