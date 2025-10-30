@@ -12,20 +12,19 @@ class Hyperliquid:
         
     def order(self, coin, is_buy, sz, order_type="market", limit_px=0):
         """
-        Place an order using Hyperliquid API - CORRECT FORMAT
+        Place an order using Hyperliquid API - CORRECT FORMAT per docs
         """
-        # CORRECT order format based on Hyperliquid API documentation
+        # CORRECT order format from Hyperliquid documentation
         order_payload = {
             "action": {
                 "type": "order",
                 "orders": [
                     {
-                        "a": coin,  # asset (coin)
-                        "b": is_buy,  # is_buy (boolean)
-                        "p": float(limit_px),  # price (number)
-                        "s": float(sz),  # size (number)
-                        "r": False,  # reduce_only (boolean)
-                        "t": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
+                        "coin": coin,
+                        "side": "A" if is_buy else "B",  # A for buy, B for sell
+                        "sz": str(sz),  # Size as string
+                        "limit_px": str(limit_px),  # Price as string
+                        "order_type": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
                     }
                 ],
                 "grouping": "na"
@@ -34,6 +33,7 @@ class Hyperliquid:
         
         print(f"Sending order: {json.dumps(order_payload, indent=2)}")
         
+        # Sign the request
         signature = self._sign_request(order_payload)
         
         headers = {
@@ -50,15 +50,18 @@ class Hyperliquid:
             )
             
             print(f"Response status: {response.status_code}")
-            print(f"Response headers: {dict(response.headers)}")
             print(f"Response text: {response.text}")
             
             if response.status_code == 200:
                 try:
                     response_data = response.json()
-                    return {"status": "success", "response": response_data}
-                except:
-                    return {"status": "success", "response": response.text}
+                    # Check if order was successful
+                    if "status" in response_data and response_data["status"] == "ok":
+                        return {"status": "success", "response": response_data}
+                    else:
+                        return {"status": "error", "error": response_data}
+                except Exception as e:
+                    return {"status": "error", "error": f"JSON parse error: {str(e)}"}
             else:
                 return {"status": "error", "error": f"HTTP {response.status_code}: {response.text}"}
                 
@@ -76,11 +79,10 @@ class Hyperliquid:
             msg=bytes(message, 'utf-8'),
             digestmod=hashlib.sha256
         ).hexdigest()
-        print(f"Signature: {signature}")
         return signature
 
     def get_exchange_info(self):
-        """Get exchange info to verify symbols"""
+        """Get exchange meta information"""
         info_payload = {
             "type": "meta"
         }
@@ -98,10 +100,37 @@ class Hyperliquid:
         except Exception as e:
             return {"error": str(e)}
 
+    def get_user_state(self):
+        """Get user state to verify connection"""
+        info_payload = {
+            "type": "userState",
+            "user": self.wallet_address
+        }
+        
+        signature = self._sign_request(info_payload)
+        headers = {
+            "Content-Type": "application/json", 
+            "X-API-Signature": signature
+        }
+        
+        try:
+            response = requests.post(
+                f"{self.base_url}/info",
+                json=info_payload,
+                headers=headers,
+                timeout=10
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": f"HTTP {response.status_code}: {response.text}"}
+        except Exception as e:
+            return {"error": str(e)}
+
     def get_available_coins(self):
-        """Get list of available coins"""
+        """Get list of available trading coins"""
         info = self.get_exchange_info()
-        if 'universe' in info:
+        if isinstance(info, dict) and 'universe' in info:
             coins = [item['name'] for item in info['universe']]
             return coins
         return []
