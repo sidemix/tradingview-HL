@@ -8,286 +8,169 @@ from config import SECRET_KEY, WALLET_ADDRESS
 
 app = Flask(__name__)
 
-def test_basic_connection():
-    """Test the most basic API connection"""
+@app.route('/discover-api', methods=['GET'])
+def discover_api():
+    """Discover the correct Hyperliquid API format"""
     tests = {}
     
-    # Test 1: Basic meta endpoint (no auth needed)
-    try:
-        meta_response = requests.post(
-            "https://api.hyperliquid.xyz/info",
-            json={"type": "meta"},
-            timeout=10
-        )
-        tests['meta_endpoint'] = {
-            'status': meta_response.status_code,
-            'response': meta_response.text[:200] if meta_response.text else 'Empty'
-        }
-    except Exception as e:
-        tests['meta_endpoint'] = {'error': str(e)}
-    
-    # Test 2: User state with different formats
-    user_formats = [
-        WALLET_ADDRESS,  # Original
-        WALLET_ADDRESS.lower(),  # Lowercase
-        WALLET_ADDRESS.upper(),  # Uppercase
+    # Test different base URLs and endpoints
+    base_urls = [
+        "https://api.hyperliquid.xyz",
+        "https://api.hyperliquid.xyz/api",
+        "https://api.hyperliquid.xyz/v1",
+        "https://hyperliquid.xyz/api",
     ]
     
-    tests['user_state_tests'] = []
-    for user_format in user_formats:
-        try:
-            response = requests.post(
-                "https://api.hyperliquid.xyz/info",
-                json={"type": "userState", "user": user_format},
-                timeout=10
-            )
-            tests['user_state_tests'].append({
-                'format': user_format,
-                'status': response.status_code,
-                'response': response.text
-            })
-        except Exception as e:
-            tests['user_state_tests'].append({
-                'format': user_format,
-                'error': str(e)
-            })
+    # Test different HTTP methods
+    methods = ['GET', 'POST']
     
-    return tests
-
-def test_order_signing():
-    """Test if our signing is working correctly"""
-    test_payload = {
-        "action": {
-            "type": "order",
-            "orders": [
-                {
-                    "coin": "BTC",
-                    "side": "A",
-                    "sz": "0.001",
-                    "order_type": {"market": {}}
-                }
-            ],
-            "grouping": "na"
-        }
-    }
+    # Test different content types
+    content_types = [
+        'application/json',
+        'application/x-www-form-urlencoded'
+    ]
     
-    # Test signature generation
-    message = json.dumps(test_payload, separators=(',', ':'), sort_keys=True)
-    signature = hmac.new(
-        bytes(SECRET_KEY, 'utf-8'),
-        msg=bytes(message, 'utf-8'),
-        digestmod=hashlib.sha256
-    ).hexdigest()
-    
-    return {
-        'message': message,
-        'signature': signature,
-        'secret_key_length': len(SECRET_KEY),
-        'secret_key_prefix': SECRET_KEY[:10] + '...' if SECRET_KEY else 'None'
-    }
-
-def analyze_error(error_text):
-    """Analyze common Hyperliquid errors"""
-    if "Failed to deserialize" in error_text:
-        return "API format error - check payload structure"
-    elif "signature" in error_text.lower():
-        return "Signature verification failed"
-    elif "unauthorized" in error_text.lower():
-        return "API key permissions issue"
-    elif "user" in error_text.lower():
-        return "User/wallet address issue"
-    else:
-        return "Unknown error - check API key and permissions"
-
-@app.route('/debug', methods=['GET'])
-def debug():
-    """Comprehensive debug endpoint"""
-    try:
-        basic_tests = test_basic_connection()
-        signing_test = test_order_signing()
+    for base_url in base_urls:
+        tests[base_url] = {}
         
-        return jsonify({
-            'status': 'debug_complete',
-            'basic_tests': basic_tests,
-            'signing_test': signing_test,
-            'env_vars': {
-                'wallet_address_set': bool(WALLET_ADDRESS),
-                'wallet_address': WALLET_ADDRESS[:10] + '...' if WALLET_ADDRESS else 'None',
-                'secret_key_set': bool(SECRET_KEY),
-            }
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        for method in methods:
+            tests[base_url][method] = {}
+            
+            for content_type in content_types:
+                try:
+                    # Test meta endpoint
+                    if method == 'GET':
+                        response = requests.get(
+                            f"{base_url}/info",
+                            headers={'Content-Type': content_type},
+                            timeout=5
+                        )
+                    else:
+                        response = requests.post(
+                            f"{base_url}/info",
+                            json={"type": "meta"},
+                            headers={'Content-Type': content_type},
+                            timeout=5
+                        )
+                    
+                    tests[base_url][method][content_type] = {
+                        'status': response.status_code,
+                        'response_preview': response.text[:100] if response.text else 'Empty'
+                    }
+                    
+                except Exception as e:
+                    tests[base_url][method][content_type] = {
+                        'error': str(e)
+                    }
+    
+    return jsonify(tests)
 
-@app.route('/debug-user-state', methods=['GET'])
-def debug_user_state():
-    """Debug user state specifically"""
+@app.route('/test-raw-http', methods=['GET'])
+def test_raw_http():
+    """Test raw HTTP requests to understand the API"""
+    import http.client
+    import ssl
+    
     tests = {}
     
-    # Test different user state payload formats
-    test_payloads = [
-        {"type": "userState", "user": WALLET_ADDRESS},
-        {"type": "userState", "user": WALLET_ADDRESS.lower()},
-        {"type": "userState", "user": WALLET_ADDRESS.upper()},
-        # Try without 'user' field
-        {"type": "userState"},
-        # Try with empty user
-        {"type": "userState", "user": ""},
+    # Test with raw HTTP connection
+    try:
+        # Create connection
+        conn = http.client.HTTPSConnection("api.hyperliquid.xyz", context=ssl._create_unverified_context())
+        
+        # Test 1: GET request to /info
+        conn.request("GET", "/info", headers={'Content-Type': 'application/json'})
+        response1 = conn.getresponse()
+        tests['get_info'] = {
+            'status': response1.status,
+            'headers': dict(response1.getheaders()),
+            'body': response1.read().decode()[:200]
+        }
+        
+        # Test 2: POST request to /info
+        headers = {'Content-Type': 'application/json'}
+        body = json.dumps({"type": "meta"})
+        conn.request("POST", "/info", body=body, headers=headers)
+        response2 = conn.getresponse()
+        tests['post_info_meta'] = {
+            'status': response2.status,
+            'headers': dict(response2.getheaders()),
+            'body': response2.read().decode()[:200]
+        }
+        
+        conn.close()
+        
+    except Exception as e:
+        tests['error'] = str(e)
+    
+    return jsonify(tests)
+
+@app.route('/check-hyperliquid-docs', methods=['GET'])
+def check_hyperliquid_docs():
+    """Check what the actual Hyperliquid API expects"""
+    # Let's try to find working examples from their docs or GitHub
+    tests = {}
+    
+    # Try the exact format from potential working examples
+    test_formats = [
+        # Format 1: Simple meta request
+        {"type": "meta"},
+        
+        # Format 2: Maybe they expect different structure
+        {"method": "meta"},
+        
+        # Format 3: Try with action field like exchange endpoints
+        {"action": {"type": "meta"}},
+        
+        # Format 4: Empty request
+        {},
     ]
     
-    for i, payload in enumerate(test_payloads):
+    for i, test_format in enumerate(test_formats):
         try:
             response = requests.post(
                 "https://api.hyperliquid.xyz/info",
-                json=payload,
+                json=test_format,
                 timeout=10
             )
-            tests[f'test_{i}'] = {
-                'payload': payload,
+            tests[f'format_{i}'] = {
+                'payload': test_format,
                 'status': response.status_code,
-                'response': response.text
+                'response': response.text[:200]
             }
         except Exception as e:
-            tests[f'test_{i}'] = {
-                'payload': payload,
+            tests[f'format_{i}'] = {
+                'payload': test_format,
                 'error': str(e)
             }
     
     return jsonify(tests)
 
-@app.route('/test-api-key', methods=['GET'])
-def test_api_key():
-    """Test if API key has order permissions"""
-    try:
-        # Try a very simple order to test permissions
-        test_payload = {
+@app.route('/test-exchange-endpoint', methods=['GET'])
+def test_exchange_endpoint():
+    """Test the exchange endpoint with different formats"""
+    tests = {}
+    
+    # Different order formats to try
+    order_formats = [
+        # Format 1: Current format
+        {
             "action": {
                 "type": "order",
                 "orders": [
                     {
                         "coin": "BTC",
-                        "side": "A", 
+                        "side": "A",
                         "sz": "0.001",
                         "order_type": {"market": {}}
                     }
                 ],
                 "grouping": "na"
             }
-        }
+        },
         
-        message = json.dumps(test_payload, separators=(',', ':'), sort_keys=True)
-        signature = hmac.new(
-            bytes(SECRET_KEY, 'utf-8'),
-            msg=bytes(message, 'utf-8'),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Signature": signature
-        }
-        
-        response = requests.post(
-            "https://api.hyperliquid.xyz/exchange",
-            json=test_payload,
-            headers=headers,
-            timeout=10
-        )
-        
-        return jsonify({
-            'status_code': response.status_code,
-            'response': response.text,
-            'error_analysis': analyze_error(response.text)
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/check-wallet', methods=['GET'])
-def check_wallet():
-    """Check if wallet exists and get basic info"""
-    try:
-        # Get all user states to see available wallets
-        meta_response = requests.post(
-            "https://api.hyperliquid.xyz/info",
-            json={"type": "meta"},
-            timeout=10
-        )
-        
-        # Try to get any user info that works
-        test_users = [
-            WALLET_ADDRESS,
-            "0x0000000000000000000000000000000000000000",  # Test with zero address
-        ]
-        
-        results = {}
-        for user in test_users:
-            try:
-                response = requests.post(
-                    "https://api.hyperliquid.xyz/info",
-                    json={"type": "userState", "user": user},
-                    timeout=5
-                )
-                results[user] = {
-                    'status': response.status_code,
-                    'response': response.text[:200]
-                }
-            except:
-                results[user] = {'error': 'timeout'}
-        
-        return jsonify({
-            'meta_status': meta_response.status_code,
-            'wallet_tests': results,
-            'available_coins_count': len(meta_response.json().get('universe', [])) if meta_response.status_code == 200 else 0
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/test-networks', methods=['GET'])
-def test_networks():
-    """Test both mainnet and testnet"""
-    networks = {
-        'mainnet': 'https://api.hyperliquid.xyz',
-        'testnet': 'https://api.hyperliquid-testnet.xyz'
-    }
-    
-    results = {}
-    
-    for name, url in networks.items():
-        try:
-            # Test meta endpoint
-            meta_response = requests.post(
-                f"{url}/info",
-                json={"type": "meta"},
-                timeout=10
-            )
-            
-            # Test user state
-            user_response = requests.post(
-                f"{url}/info", 
-                json={"type": "userState", "user": WALLET_ADDRESS},
-                timeout=10
-            )
-            
-            results[name] = {
-                'meta_status': meta_response.status_code,
-                'user_state_status': user_response.status_code,
-                'meta_response': meta_response.text[:100],
-                'user_state_response': user_response.text[:100]
-            }
-            
-        except Exception as e:
-            results[name] = {'error': str(e)}
-    
-    return jsonify(results)
-
-@app.route('/test-simple-order', methods=['POST'])
-def test_simple_order():
-    """Test order with minimal parameters"""
-    try:
-        # Try the absolute simplest possible order
-        simple_payload = {
+        # Format 2: Without grouping
+        {
             "action": {
                 "type": "order",
                 "orders": [
@@ -299,41 +182,68 @@ def test_simple_order():
                     }
                 ]
             }
+        },
+        
+        # Format 3: Different order structure
+        {
+            "action": "order",
+            "orders": [
+                {
+                    "coin": "BTC",
+                    "side": "A",
+                    "sz": "0.001",
+                    "order_type": "market"
+                }
+            ]
+        },
+        
+        # Format 4: Minimal format
+        {
+            "order": {
+                "coin": "BTC",
+                "side": "A",
+                "sz": "0.001",
+                "order_type": "market"
+            }
         }
-        
-        # Remove grouping to see if that's the issue
-        print(f"Testing simple order: {json.dumps(simple_payload)}")
-        
-        # Sign the request
-        message = json.dumps(simple_payload, separators=(',', ':'), sort_keys=True)
-        signature = hmac.new(
-            bytes(SECRET_KEY, 'utf-8'),
-            msg=bytes(message, 'utf-8'),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Signature": signature
-        }
-        
-        response = requests.post(
-            "https://api.hyperliquid.xyz/exchange",
-            json=simple_payload,
-            headers=headers,
-            timeout=10
-        )
-        
-        return jsonify({
-            'simple_payload': simple_payload,
-            'signature': signature,
-            'status_code': response.status_code,
-            'response': response.text,
-            'headers_sent': {'X-API-Signature': 'present'}  # Don't log actual signature
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    ]
+    
+    for i, order_format in enumerate(order_formats):
+        try:
+            # Sign the request
+            message = json.dumps(order_format, separators=(',', ':'), sort_keys=True)
+            signature = hmac.new(
+                bytes(SECRET_KEY, 'utf-8'),
+                msg=bytes(message, 'utf-8'),
+                digestmod=hashlib.sha256
+            ).hexdigest()
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-API-Signature": signature
+            }
+            
+            response = requests.post(
+                "https://api.hyperliquid.xyz/exchange",
+                json=order_format,
+                headers=headers,
+                timeout=10
+            )
+            
+            tests[f'format_{i}'] = {
+                'payload': order_format,
+                'status': response.status_code,
+                'response': response.text,
+                'signature': signature[:20] + '...'
+            }
+            
+        except Exception as e:
+            tests[f'format_{i}'] = {
+                'payload': order_format,
+                'error': str(e)
+            }
+    
+    return jsonify(tests)
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -342,15 +252,13 @@ def health_check():
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
-        "message": "TradingView to Hyperliquid Webhook - DEBUG MODE",
+        "message": "Hyperliquid API Discovery",
         "endpoints": {
             "health": "/health",
-            "debug": "/debug",
-            "debug_user_state": "/debug-user-state",
-            "test_api_key": "/test-api-key", 
-            "check_wallet": "/check-wallet",
-            "test_networks": "/test-networks",
-            "test_simple_order": "/test-simple-order (POST)"
+            "discover_api": "/discover-api",
+            "test_raw_http": "/test-raw-http", 
+            "check_docs": "/check-hyperliquid-docs",
+            "test_exchange": "/test-exchange-endpoint"
         }
     })
 
