@@ -1,24 +1,3 @@
-from flask import Flask, request, jsonify
-import hmac
-import hashlib
-import json
-from hyperliquid import Hyperliquid
-import os
-from config import SECRET_KEY, WALLET_ADDRESS
-
-app = Flask(__name__)
-
-# Initialize Hyperliquid client
-hl = Hyperliquid(WALLET_ADDRESS, SECRET_KEY)
-
-def verify_tradingview_webhook(data, signature):
-    """
-    Verify the webhook came from TradingView
-    You can add your own secret verification here
-    """
-    # Implement your verification logic here if you set WEBHOOK_SECRET
-    return True
-
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     try:
@@ -49,27 +28,31 @@ def handle_webhook():
         
         print(f"Processing order: {side} {size} {symbol}")
         
-        # Try different symbol formats
-        symbol_variations = [symbol, f"{symbol}-PERP", f"{symbol}USD", f"{symbol}USDC"]
+        # Get available coins to find correct symbol
+        available_coins = hl.get_available_coins()
+        print(f"Available coins: {available_coins}")
+        
+        # Find the correct coin name
+        target_coin = None
+        for coin in available_coins:
+            if symbol in coin.upper():
+                target_coin = coin
+                break
+        
+        if not target_coin:
+            target_coin = symbol  # Fallback to original
+        
+        print(f"Using coin: {target_coin}")
         
         # Execute trade on Hyperliquid
         if side in ['buy', 'sell']:
-            # Try with original symbol first
-            result = hl.order(symbol, side == 'buy', size, order_type)
+            result = hl.order(target_coin, side == 'buy', size, order_type)
             print(f"Hyperliquid response: {result}")
-            
-            # If original fails, try variations
-            if result.get('status') != 'success':
-                for symbol_var in symbol_variations[1:]:
-                    print(f"Trying symbol variation: {symbol_var}")
-                    result = hl.order(symbol_var, side == 'buy', size, order_type)
-                    if result.get('status') == 'success':
-                        break
             
             if result.get('status') == 'success':
                 return jsonify({
                     "status": "success", 
-                    "message": f"Order executed: {side} {size} {symbol}",
+                    "message": f"Order executed: {side} {size} {target_coin}",
                     "details": result.get('response', {})
                 })
             else:
@@ -84,52 +67,3 @@ def handle_webhook():
     except Exception as e:
         print(f"Error processing webhook: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-@app.route('/symbols', methods=['GET'])
-def get_symbols():
-    """Get available symbols from Hyperliquid"""
-    try:
-        exchange_info = hl.get_exchange_info()
-        return jsonify({
-            "status": "success",
-            "symbols": exchange_info
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "healthy"})
-
-@app.route('/test', methods=['GET'])
-def test_connection():
-    """Test Hyperliquid connection"""
-    try:
-        user_state = hl.get_user_state()
-        return jsonify({
-            "status": "success",
-            "user_state": user_state
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
-
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({
-        "message": "TradingView to Hyperliquid Webhook",
-        "endpoints": {
-            "health": "/health",
-            "webhook": "/webhook (POST)",
-            "test": "/test"
-        }
-    })
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
