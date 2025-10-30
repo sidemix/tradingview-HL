@@ -66,8 +66,9 @@ class HyperliquidTrader:
             # Create signing key
             sk = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
             
-            # Serialize the data exactly as Hyperliquid expects
-            message = json.dumps(data, separators=(',', ':'), sort_keys=True)
+            # IMPORTANT: Hyperliquid might use a different message format
+            # Try without sorting keys and with different separators
+            message = json.dumps(data, separators=(',', ':'))  # No sort_keys
             logger.info(f"Signing message: {message}")
             
             # Hash the message
@@ -77,16 +78,23 @@ class HyperliquidTrader:
             signature = sk.sign_digest(message_hash, sigencode=ecdsa.util.sigencode_der)
             
             # Parse the DER-encoded signature to get r and s
-            # This is a simplified approach - for production use a proper DER parser
-            r = signature[4:36]  # Skip DER header
-            s = signature[38:70] # Skip DER header and length bytes
+            r_start = 4  # Skip DER header: 0x30 [length] 0x02 [r_length]
+            r_length = signature[r_start]
+            r_end = r_start + 1 + r_length
+            r = signature[r_start + 2:r_end]  # Skip 0x02 and r_length
             
-            r_hex = r.hex()
-            s_hex = s.hex()
+            s_start = r_end + 1  # Skip 0x02
+            s_length = signature[s_start]
+            s_end = s_start + 1 + s_length
+            s = signature[s_start + 2:s_end]  # Skip 0x02 and s_length
+            
+            # Ensure r and s are 32 bytes
+            r = r.rjust(32, b'\x00')[-32:]
+            s = s.rjust(32, b'\x00')[-32:]
             
             signature_obj = {
-                "r": f"0x{r_hex}",
-                "s": f"0x{s_hex}",
+                "r": f"0x{r.hex()}",
+                "s": f"0x{s.hex()}",
                 "v": 27  # Standard Ethereum v value
             }
             
@@ -95,16 +103,10 @@ class HyperliquidTrader:
             
         except Exception as e:
             logger.error(f"Signature generation failed: {e}")
-            # Fallback to simple HMAC (won't work but helps debugging)
-            message = json.dumps(data, separators=(',', ':'), sort_keys=True)
-            fallback_hash = hmac.new(
-                self.secret_key.encode('utf-8'),
-                message.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
+            # Return a dummy signature for testing
             return {
-                "r": f"0x{fallback_hash[:64]}",
-                "s": f"0x{fallback_hash[64:128]}",
+                "r": "0x" + "0" * 64,
+                "s": "0x" + "0" * 64,
                 "v": 27
             }
 
@@ -126,7 +128,7 @@ class HyperliquidTrader:
             "signature": signature
         }
         
-        logger.info(f"Sending exchange request...")
+        logger.info(f"Sending exchange request with nonce: {nonce}")
         
         headers = {
             "Content-Type": "application/json"
@@ -135,7 +137,7 @@ class HyperliquidTrader:
         response = requests.post(self.exchange_url, json=request_data, headers=headers)
         
         logger.info(f"Response status: {response.status_code}")
-        logger.info(f"Response text: {response.text[:200]}...")  # First 200 chars
+        logger.info(f"Response text: {response.text}")
         
         try:
             response_data = response.json()
@@ -220,11 +222,12 @@ def tradingview_webhook():
         # Execute trade
         result = trader.place_market_order(symbol, is_buy, quantity)
         
-        if "error" in result:
+        # Check if it's an error response
+        if result.get("status") == "err":
             return jsonify({
                 "status": "error",
-                "message": f"Trade failed: {result['error']}",
-                "status_code": result.get("status_code", 400)
+                "message": f"Trade failed: {result.get('response', 'Unknown error')}",
+                "result": result
             }), 400
         
         return jsonify({
@@ -258,7 +261,7 @@ def home():
             "health": "/health (GET)",
             "webhook": "/webhook/tradingview (POST)"
         },
-        "status": "ACTIVE - Testing signature generation"
+        "status": "ACTIVE - Fixing signature recovery"
     }), 200
 
 if __name__ == '__main__':
