@@ -86,6 +86,19 @@ def test_order_signing():
         'secret_key_prefix': SECRET_KEY[:10] + '...' if SECRET_KEY else 'None'
     }
 
+def analyze_error(error_text):
+    """Analyze common Hyperliquid errors"""
+    if "Failed to deserialize" in error_text:
+        return "API format error - check payload structure"
+    elif "signature" in error_text.lower():
+        return "Signature verification failed"
+    elif "unauthorized" in error_text.lower():
+        return "API key permissions issue"
+    elif "user" in error_text.lower():
+        return "User/wallet address issue"
+    else:
+        return "Unknown error - check API key and permissions"
+
 @app.route('/debug', methods=['GET'])
 def debug():
     """Comprehensive debug endpoint"""
@@ -105,101 +118,6 @@ def debug():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-@app.route('/test-simple-order', methods=['POST'])
-def test_simple_order():
-    """Test order with minimal parameters"""
-    try:
-        # Try the absolute simplest possible order
-        simple_payload = {
-            "action": {
-                "type": "order",
-                "orders": [
-                    {
-                        "coin": "BTC",
-                        "side": "A",
-                        "sz": "0.001",
-                        "order_type": {"market": {}}
-                    }
-                ]
-            }
-        }
-        
-        # Remove grouping to see if that's the issue
-        print(f"Testing simple order: {json.dumps(simple_payload)}")
-        
-        # Sign the request
-        message = json.dumps(simple_payload, separators=(',', ':'), sort_keys=True)
-        signature = hmac.new(
-            bytes(SECRET_KEY, 'utf-8'),
-            msg=bytes(message, 'utf-8'),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Signature": signature
-        }
-        
-        response = requests.post(
-            "https://api.hyperliquid.xyz/exchange",
-            json=simple_payload,
-            headers=headers,
-            timeout=10
-        )
-        
-        return jsonify({
-            'simple_payload': simple_payload,
-            'signature': signature,
-            'status_code': response.status_code,
-            'response': response.text,
-            'headers_sent': {'X-API-Signature': 'present'}  # Don't log actual signature
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/test-permissions', methods=['GET'])
-def test_permissions():
-    """Test if API key has correct permissions"""
-    try:
-        # Try to check what the API key can do
-        test_payload = {
-            "action": {
-                "type": "order"
-            }
-        }
-        
-        message = json.dumps(test_payload, separators=(',', ':'), sort_keys=True)
-        signature = hmac.new(
-            bytes(SECRET_KEY, 'utf-8'),
-            msg=bytes(message, 'utf-8'),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        
-        headers = {
-            "Content-Type": "application/json", 
-            "X-API-Signature": signature
-        }
-        
-        response = requests.post(
-            "https://api.hyperliquid.xyz/exchange",
-            json=test_payload,
-            headers=headers,
-            timeout=10
-        )
-        
-        return jsonify({
-            'status_code': response.status_code,
-            'response': response.text
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "healthy"})
 
 @app.route('/debug-user-state', methods=['GET'])
 def debug_user_state():
@@ -285,19 +203,6 @@ def test_api_key():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def analyze_error(error_text):
-    """Analyze common Hyperliquid errors"""
-    if "Failed to deserialize" in error_text:
-        return "API format error - check payload structure"
-    elif "signature" in error_text.lower():
-        return "Signature verification failed"
-    elif "unauthorized" in error_text.lower():
-        return "API key permissions issue"
-    elif "user" in error_text.lower():
-        return "User/wallet address issue"
-    else:
-        return "Unknown error - check API key and permissions"
-
 @app.route('/check-wallet', methods=['GET'])
 def check_wallet():
     """Check if wallet exists and get basic info"""
@@ -377,6 +282,63 @@ def test_networks():
     
     return jsonify(results)
 
+@app.route('/test-simple-order', methods=['POST'])
+def test_simple_order():
+    """Test order with minimal parameters"""
+    try:
+        # Try the absolute simplest possible order
+        simple_payload = {
+            "action": {
+                "type": "order",
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ]
+            }
+        }
+        
+        # Remove grouping to see if that's the issue
+        print(f"Testing simple order: {json.dumps(simple_payload)}")
+        
+        # Sign the request
+        message = json.dumps(simple_payload, separators=(',', ':'), sort_keys=True)
+        signature = hmac.new(
+            bytes(SECRET_KEY, 'utf-8'),
+            msg=bytes(message, 'utf-8'),
+            digestmod=hashlib.sha256
+        ).hexdigest()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Signature": signature
+        }
+        
+        response = requests.post(
+            "https://api.hyperliquid.xyz/exchange",
+            json=simple_payload,
+            headers=headers,
+            timeout=10
+        )
+        
+        return jsonify({
+            'simple_payload': simple_payload,
+            'signature': signature,
+            'status_code': response.status_code,
+            'response': response.text,
+            'headers_sent': {'X-API-Signature': 'present'}  # Don't log actual signature
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy"})
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
@@ -384,8 +346,11 @@ def home():
         "endpoints": {
             "health": "/health",
             "debug": "/debug",
-            "test_simple_order": "/test-simple-order (POST)",
-            "test_permissions": "/test-permissions"
+            "debug_user_state": "/debug-user-state",
+            "test_api_key": "/test-api-key", 
+            "check_wallet": "/check-wallet",
+            "test_networks": "/test-networks",
+            "test_simple_order": "/test-simple-order (POST)"
         }
     })
 
