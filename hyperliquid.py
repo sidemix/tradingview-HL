@@ -12,9 +12,9 @@ class Hyperliquid:
         
     def order(self, coin, is_buy, sz, order_type="market", limit_px=0):
         """
-        Place an order using Hyperliquid API - EXACT CORRECT FORMAT
+        Place an order using Hyperliquid API
         """
-        # Create order based on type - using exact format from Hyperliquid docs
+        # Create order based on type
         if order_type == "market":
             order = {
                 "coin": coin,
@@ -31,7 +31,6 @@ class Hyperliquid:
                 "order_type": {"limit": {"tif": "Gtc"}}
             }
         
-        # The exact payload structure from Hyperliquid documentation
         order_payload = {
             "action": {
                 "type": "order",
@@ -64,7 +63,6 @@ class Hyperliquid:
             if response.status_code == 200:
                 try:
                     response_data = response.json()
-                    # Check if order was successful
                     if response_data.get("status") == "ok":
                         return {"status": "success", "response": response_data}
                     else:
@@ -116,17 +114,11 @@ class Hyperliquid:
             "user": self.wallet_address
         }
         
-        signature = self._sign_request(info_payload)
-        headers = {
-            "Content-Type": "application/json", 
-            "X-API-Signature": signature
-        }
-        
+        # Don't sign user state requests - they are public info endpoints
         try:
             response = requests.post(
                 f"{self.base_url}/info",
                 json=info_payload,
-                headers=headers,
                 timeout=10
             )
             if response.status_code == 200:
