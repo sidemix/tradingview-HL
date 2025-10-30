@@ -27,24 +27,25 @@ class HyperliquidTrader:
             base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
             logger.info(f"Initializing with base_url: {base_url}")
             
+            # Initialize Info first
             self.info = Info(base_url, skip_ws=True)
             
-            # CORRECT Exchange initialization based on SDK source
-            # The Exchange class takes: (wallet, key, base_url, account_address)
+            # SIMPLE Exchange initialization - let the SDK handle it
             self.exchange = Exchange(
-                self.account_address,  # wallet
-                self.secret_key,       # key (private key)
-                base_url=base_url,
-                account_address=self.account_address  # might be needed for some operations
+                self.account_address,
+                self.secret_key,
+                base_url=base_url
             )
             
-            # Test the connection by getting user state
+            # Test by getting user state
             user_state = self.info.user_state(self.account_address)
-            balance = user_state.get('withdrawable', 0)
-            logger.info(f"Hyperliquid initialized successfully. Balance: {balance}")
+            logger.info(f"User state retrieved: {user_state}")
+            
+            logger.info("✅ Hyperliquid initialized successfully!")
             
         except Exception as e:
-            logger.error(f"Failed to initialize Hyperliquid: {e}")
+            logger.error(f"❌ Failed to initialize Hyperliquid: {e}")
+            logger.error(f"Error type: {type(e).__name__}")
             self.exchange = None
             self.info = None
 
@@ -53,9 +54,9 @@ class HyperliquidTrader:
             raise Exception("Hyperliquid not configured")
         
         try:
-            # Place market order (limit_px=0 for market)
+            # Market order with limit_px=0
             result = self.exchange.order(coin, is_buy, size, 0, {"limit": {"tif": "Gtc"}})
-            logger.info(f"Order placed: {result}")
+            logger.info(f"Order result: {result}")
             return result
         except Exception as e:
             logger.error(f"Order failed: {e}")
@@ -66,7 +67,7 @@ class HyperliquidTrader:
             return 0
         try:
             user_state = self.info.user_state(self.account_address)
-            return float(user_state["withdrawable"])
+            return float(user_state.get("withdrawable", 0))
         except Exception as e:
             logger.error(f"Balance check failed: {e}")
             return 0
@@ -83,11 +84,9 @@ def tradingview_webhook():
             
         logger.info(f"Received TradingView alert: {data}")
         
-        # Parse alert
         symbol = data.get('symbol', 'BTC').upper()
         action = data.get('action', 'buy').lower()
         quantity = float(data.get('quantity', 0.001))
-        order_type = data.get('order_type', 'market')
         
         is_buy = action in ['buy', 'long']
         
@@ -96,17 +95,11 @@ def tradingview_webhook():
                 "status": "demo",
                 "message": f"Alert received: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
                 "credentials_provided": True,
-                "note": "Exchange initialization failed - check deployment logs"
+                "note": "Exchange initialization issue - check deployment logs"
             }), 200
         
         # Execute trade
-        if order_type == 'market':
-            result = trader.place_market_order(symbol, is_buy, quantity)
-        else:
-            price = float(data.get('price', 0))
-            if price <= 0:
-                return jsonify({"status": "error", "message": "Price required for limit orders"}), 400
-            result = trader.exchange.order(symbol, is_buy, quantity, price, {"limit": {"tif": "Gtc"}})
+        result = trader.place_market_order(symbol, is_buy, quantity)
         
         return jsonify({
             "status": "success", 
@@ -122,13 +115,12 @@ def tradingview_webhook():
 def health_check():
     trading_status = "active" if trader.exchange else "demo"
     balance = trader.get_balance()
-    credentials_set = bool(trader.account_address and trader.secret_key)
     
     return jsonify({
         "status": "healthy",
         "trading": trading_status,
         "balance": balance,
-        "credentials_set": credentials_set,
+        "credentials_set": bool(trader.account_address and trader.secret_key),
         "network": "testnet" if trader.use_testnet else "mainnet"
     }), 200
 
