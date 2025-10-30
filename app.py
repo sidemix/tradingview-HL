@@ -265,3 +265,38 @@ def home():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
+@app.route('/find-working-examples', methods=['GET'])
+def find_working_examples():
+    """Try to find working API examples"""
+    # Common working API patterns from other exchanges
+    tests = {}
+    
+    # Pattern 1: RESTful style
+    try:
+        response = requests.get("https://api.hyperliquid.xyz/api/v1/info")
+        tests['restful_get'] = {
+            'status': response.status_code,
+            'response': response.text[:200]
+        }
+    except Exception as e:
+        tests['restful_get'] = {'error': str(e)}
+    
+    # Pattern 2: GraphQL style (some exchanges use this)
+    try:
+        graphql_query = {
+            "query": "query { meta { universe { name } } }"
+        }
+        response = requests.post(
+            "https://api.hyperliquid.xyz/graphql",
+            json=graphql_query,
+            timeout=10
+        )
+        tests['graphql'] = {
+            'status': response.status_code,
+            'response': response.text[:200]
+        }
+    except Exception as e:
+        tests['graphql'] = {'error': str(e)}
+    
+    return jsonify(tests)
