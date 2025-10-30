@@ -1,121 +1,122 @@
 from flask import Flask, request, jsonify
 import logging
-from hyperliquid_trader import HyperliquidTrader
 import os
+from hyperliquid.exchange import Exchange
+from hyperliquid.info import Info
+from hyperliquid.utils import constants
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize trader
-try:
-    trader = HyperliquidTrader()
-    logger.info("Hyperliquid trader initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize Hyperliquid trader: {e}")
-    trader = None
+class HyperliquidTrader:
+    def __init__(self):
+        self.use_testnet = os.getenv("USE_TESTNET", "true").lower() == "true"
+        self.account_address = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS")
+        self.secret_key = os.getenv("HYPERLIQUID_SECRET_KEY")
+        
+        if not self.account_address or not self.secret_key:
+            logger.warning("Hyperliquid credentials not set - running in demo mode")
+            self.exchange = None
+            self.info = None
+            return
+        
+        try:
+            base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
+            self.info = Info(base_url, skip_ws=True)
+            self.exchange = Exchange(self.account_address, self.secret_key, base_url=base_url)
+            logger.info("Hyperliquid trader initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Hyperliquid: {e}")
+            self.exchange = None
+            self.info = None
 
-def parse_tradingview_alert(alert_data: dict) -> dict:
-    """Parse TradingView alert data"""
-    try:
-        # Handle different alert formats
-        if isinstance(alert_data, str):
-            import json
-            alert_data = json.loads(alert_data)
+    def place_market_order(self, coin: str, is_buy: bool, size: float):
+        if not self.exchange:
+            raise Exception("Hyperliquid not configured - check environment variables")
         
-        # Extract trade parameters
-        symbol = alert_data.get('symbol', '').upper()
-        action = alert_data.get('action', '').lower()
-        quantity = float(alert_data.get('quantity', 0))
-        price = float(alert_data.get('price', 0))
-        order_type = alert_data.get('order_type', 'market').lower()
-        
-        # Validate required fields
-        if not symbol or quantity <= 0:
-            raise ValueError("Missing symbol or invalid quantity")
-        
-        is_buy = action in ['buy', 'long']
-        
-        return {
-            'symbol': symbol,
-            'is_buy': is_buy,
-            'quantity': quantity,
-            'price': price,
-            'order_type': order_type
-        }
-    except Exception as e:
-        logger.error(f"Error parsing alert: {e}")
-        raise
+        return self.exchange.order(coin, is_buy, size, 0, {"limit": {"tif": "Gtc"}})
+
+    def get_balance(self):
+        if not self.info:
+            return 0
+        user_state = self.info.user_state(self.account_address)
+        return float(user_state["withdrawable"])
+
+# Initialize trader
+trader = HyperliquidTrader()
 
 @app.route('/webhook/tradingview', methods=['POST'])
 def tradingview_webhook():
     try:
-        if trader is None:
-            return jsonify({
-                "status": "error",
-                "message": "Trader not initialized. Check environment variables."
-            }), 500
-            
         data = request.get_json()
         if not data:
-            return jsonify({
-                "status": "error", 
-                "message": "No JSON data received"
-            }), 400
+            return jsonify({"status": "error", "message": "No JSON data received"}), 400
             
         logger.info(f"Received TradingView alert: {data}")
         
-        # Parse the alert
-        trade_params = parse_tradingview_alert(data)
+        # Parse alert
+        symbol = data.get('symbol', 'BTC').upper()
+        action = data.get('action', 'buy').lower()
+        quantity = float(data.get('quantity', 0.001))
+        order_type = data.get('order_type', 'market')
         
-        # Execute trade based on order type
-        if trade_params['order_type'] == 'market':
-            result = trader.place_market_order(
-                coin=trade_params['symbol'],
-                is_buy=trade_params['is_buy'],
-                size=trade_params['quantity']
-            )
+        is_buy = action in ['buy', 'long']
+        
+        if trader.exchange is None:
+            return jsonify({
+                "status": "demo",
+                "message": f"Alert received: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
+                "note": "Trading disabled - check Hyperliquid credentials"
+            }), 200
+        
+        # Execute trade
+        if order_type == 'market':
+            result = trader.place_market_order(symbol, is_buy, quantity)
         else:
-            result = trader.place_limit_order(
-                coin=trade_params['symbol'],
-                is_buy=trade_params['is_buy'],
-                size=trade_params['quantity'],
-                price=trade_params['price']
-            )
-        
-        logger.info(f"Trade executed successfully: {result}")
+            # For limit orders, you'd need price
+            price = float(data.get('price', 0))
+            if price <= 0:
+                return jsonify({"status": "error", "message": "Price required for limit orders"}), 400
+            result = trader.exchange.order(symbol, is_buy, quantity, price, {"limit": {"tif": "Gtc"}})
         
         return jsonify({
-            "status": "success",
-            "message": "Trade executed",
+            "status": "success", 
+            "message": f"Trade executed: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
             "result": result
         }), 200
         
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 400
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 400
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    status = "healthy" if trader is not None else "unhealthy"
+    trading_status = "active" if trader.exchange else "demo"
+    balance = trader.get_balance() if trader.exchange else 0
     return jsonify({
-        "status": status,
-        "account": trader.account_address if trader else "Not configured",
-        "network": "testnet" if trader and trader.use_testnet else "mainnet"
+        "status": "healthy",
+        "trading": trading_status,
+        "balance": balance,
+        "network": "testnet" if trader.use_testnet else "mainnet"
     }), 200
 
-@app.route('/balance', methods=['GET'])
-def get_balance():
-    try:
-        if trader is None:
-            return jsonify({"error": "Trader not initialized"}), 400
-        balance = trader.check_balance()
-        return jsonify({"balance": balance}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "TradingView to Hyperliquid Webhook Server",
+        "endpoints": {
+            "health": "/health (GET)",
+            "webhook": "/webhook/tradingview (POST)",
+            "usage": "Send POST requests to /webhook/tradingview with JSON payload"
+        },
+        "example_payload": {
+            "symbol": "BTC",
+            "action": "buy",
+            "quantity": 0.001,
+            "order_type": "market"
+        }
+    }), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
