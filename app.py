@@ -1,3 +1,16 @@
+from flask import Flask, request, jsonify
+import hmac
+import hashlib
+import json
+from hyperliquid import Hyperliquid
+import os
+from config import SECRET_KEY, WALLET_ADDRESS
+
+app = Flask(__name__)
+
+# Initialize Hyperliquid client
+hl = Hyperliquid(WALLET_ADDRESS, SECRET_KEY)
+
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     try:
@@ -28,19 +41,29 @@ def handle_webhook():
         
         print(f"Processing order: {side} {size} {symbol}")
         
-        # Get available coins to find correct symbol
+        # Get available coins to verify symbol
         available_coins = hl.get_available_coins()
         print(f"Available coins: {available_coins}")
         
-        # Find the correct coin name
+        # Check if symbol exists in available coins
         target_coin = None
         for coin in available_coins:
-            if symbol in coin.upper():
+            if symbol.upper() == coin.upper():
                 target_coin = coin
                 break
         
         if not target_coin:
-            target_coin = symbol  # Fallback to original
+            # Try partial match
+            for coin in available_coins:
+                if symbol.upper() in coin.upper():
+                    target_coin = coin
+                    break
+        
+        if not target_coin:
+            return jsonify({
+                "status": "error",
+                "message": f"Symbol '{symbol}' not found. Available coins: {available_coins}"
+            }), 400
         
         print(f"Using coin: {target_coin}")
         
@@ -59,7 +82,7 @@ def handle_webhook():
                 error_msg = result.get('error', 'Unknown error from Hyperliquid')
                 return jsonify({
                     "status": "error",
-                    "message": error_msg
+                    "message": f"Hyperliquid error: {error_msg}"
                 }), 400
         else:
             return jsonify({"error": "Invalid side. Use 'buy' or 'sell'"}), 400
@@ -67,3 +90,55 @@ def handle_webhook():
     except Exception as e:
         print(f"Error processing webhook: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy"})
+
+@app.route('/test', methods=['GET'])
+def test_connection():
+    """Test Hyperliquid connection and get user state"""
+    try:
+        user_state = hl.get_user_state()
+        available_coins = hl.get_available_coins()
+        return jsonify({
+            "status": "success",
+            "user_state": user_state,
+            "available_coins": available_coins
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route('/symbols', methods=['GET'])
+def get_symbols():
+    """Get available trading symbols"""
+    try:
+        available_coins = hl.get_available_coins()
+        return jsonify({
+            "status": "success",
+            "available_coins": available_coins
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "TradingView to Hyperliquid Webhook",
+        "endpoints": {
+            "health": "/health",
+            "test_connection": "/test",
+            "symbols": "/symbols",
+            "webhook": "/webhook (POST)"
+        }
+    })
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
