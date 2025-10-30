@@ -15,6 +15,8 @@ class HyperliquidTrader:
         self.account_address = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS")
         self.secret_key = os.getenv("HYPERLIQUID_SECRET_KEY")
         
+        logger.info(f"Credentials check - Address: {self.account_address}, Secret set: {bool(self.secret_key)}")
+        
         if not self.account_address or not self.secret_key:
             logger.warning("Hyperliquid credentials not set - running in demo mode")
             self.exchange = None
@@ -23,15 +25,31 @@ class HyperliquidTrader:
         
         try:
             base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
+            logger.info(f"Initializing with base_url: {base_url}")
+            
             self.info = Info(base_url, skip_ws=True)
             
-            # CORRECT Exchange initialization - check SDK documentation
-            self.exchange = Exchange(
-                self.account_address,  # wallet address
-                self.secret_key,       # private key
-                base_url=base_url
-            )
-            logger.info("Hyperliquid trader initialized successfully")
+            # Try different Exchange initialization methods
+            try:
+                # Method 1: Standard initialization
+                self.exchange = Exchange(
+                    self.account_address,
+                    self.secret_key, 
+                    base_url=base_url
+                )
+            except TypeError as e:
+                logger.warning(f"Method 1 failed: {e}, trying alternative")
+                # Method 2: Alternative initialization
+                self.exchange = Exchange(
+                    wallet=self.account_address,
+                    secret_key=self.secret_key,
+                    base_url=base_url
+                )
+            
+            # Test the connection
+            user_state = self.info.user_state(self.account_address)
+            logger.info(f"Hyperliquid initialized successfully. Balance: {user_state.get('withdrawable', 'Unknown')}")
+            
         except Exception as e:
             logger.error(f"Failed to initialize Hyperliquid: {e}")
             self.exchange = None
@@ -39,7 +57,7 @@ class HyperliquidTrader:
 
     def place_market_order(self, coin: str, is_buy: bool, size: float):
         if not self.exchange:
-            raise Exception("Hyperliquid not configured - check environment variables")
+            raise Exception("Hyperliquid not configured")
         
         return self.exchange.order(coin, is_buy, size, 0, {"limit": {"tif": "Gtc"}})
 
@@ -76,7 +94,8 @@ def tradingview_webhook():
             return jsonify({
                 "status": "demo",
                 "message": f"Alert received: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
-                "note": "Set HYPERLIQUID_ACCOUNT_ADDRESS and HYPERLIQUID_SECRET_KEY environment variables"
+                "credentials_provided": bool(trader.account_address and trader.secret_key),
+                "note": "Exchange initialization failed - check logs"
             }), 200
         
         # Execute trade
@@ -102,10 +121,13 @@ def tradingview_webhook():
 def health_check():
     trading_status = "active" if trader.exchange else "demo"
     balance = trader.get_balance()
+    credentials_set = bool(trader.account_address and trader.secret_key)
+    
     return jsonify({
         "status": "healthy",
         "trading": trading_status,
         "balance": balance,
+        "credentials_set": credentials_set,
         "network": "testnet" if trader.use_testnet else "mainnet"
     }), 200
 
@@ -116,12 +138,6 @@ def home():
         "endpoints": {
             "health": "/health (GET)",
             "webhook": "/webhook/tradingview (POST)"
-        },
-        "example_payload": {
-            "symbol": "BTC",
-            "action": "buy",
-            "quantity": 0.001,
-            "order_type": "market"
         }
     }), 200
 
