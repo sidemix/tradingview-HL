@@ -1,137 +1,70 @@
-import requests
-import hmac
-import hashlib
-import json
-import time
+from hyperliquid import Hyperliquid
+from hyperliquid.info import Info
+from hyperliquid.utils import constants
+from eth_account import Account
+import os
+from config import SECRET_KEY, WALLET_ADDRESS
 
-class Hyperliquid:
-    def __init__(self, wallet_address, secret_key, base_url="https://api.hyperliquid.xyz"):
+class HyperliquidBot:
+    def __init__(self, wallet_address, secret_key, is_testnet=False):
         self.wallet_address = wallet_address
         self.secret_key = secret_key
-        self.base_url = base_url
+        self.is_testnet = is_testnet
+        
+        # Initialize the official Hyperliquid client
+        self.client = Hyperliquid(wallet_address, secret_key, 
+                                constants.MAINNET_API_URL if not is_testnet else constants.TESTNET_API_URL)
+        self.info = Info(constants.MAINNET_API_URL if not is_testnet else constants.TESTNET_API_URL)
         
     def order(self, coin, is_buy, sz, order_type="market", limit_px=0):
         """
-        Place an order using Hyperliquid API
+        Place an order using the official Hyperliquid SDK
         """
-        # Create order based on type
-        if order_type == "market":
-            order = {
-                "coin": coin,
-                "side": "A" if is_buy else "B",
-                "sz": str(sz),
-                "order_type": {"market": {}}
-            }
-        else:
-            order = {
-                "coin": coin,
-                "side": "A" if is_buy else "B", 
-                "sz": str(sz),
-                "limit_px": str(limit_px),
-                "order_type": {"limit": {"tif": "Gtc"}}
-            }
-        
-        order_payload = {
-            "action": {
-                "type": "order",
-                "orders": [order],
-                "grouping": "na"
-            }
-        }
-        
-        print(f"Sending order: {json.dumps(order_payload, indent=2)}")
-        
-        # Sign the request
-        signature = self._sign_request(order_payload)
-        
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Signature": signature
-        }
-        
         try:
-            response = requests.post(
-                f"{self.base_url}/exchange",
-                json=order_payload,
-                headers=headers,
-                timeout=10
-            )
+            print(f"Placing order: {coin}, {is_buy}, {sz}, {order_type}")
             
-            print(f"Response status: {response.status_code}")
-            print(f"Response text: {response.text}")
+            # Get asset index (required by Hyperliquid)
+            meta = self.info.meta()
+            asset_index = None
             
-            if response.status_code == 200:
-                try:
-                    response_data = response.json()
-                    if response_data.get("status") == "ok":
-                        return {"status": "success", "response": response_data}
-                    else:
-                        return {"status": "error", "error": response_data.get("response", response_data)}
-                except Exception as e:
-                    return {"status": "error", "error": f"JSON parse error: {str(e)}"}
+            for i, asset in enumerate(meta['universe']):
+                if asset['name'] == coin:
+                    asset_index = i
+                    break
+            
+            if asset_index is None:
+                return {"status": "error", "error": f"Asset {coin} not found"}
+            
+            print(f"Found asset index: {asset_index} for {coin}")
+            
+            # Prepare order parameters (using correct format from docs)
+            if order_type == "market":
+                order_result = self.client.order(coin, is_buy, sz, None, order_type={"market": {}})
             else:
-                return {"status": "error", "error": f"HTTP {response.status_code}: {response.text}"}
+                order_result = self.client.order(coin, is_buy, sz, limit_px, order_type={"limit": {"tif": "Gtc"}})
+            
+            print(f"Order result: {order_result}")
+            
+            if order_result["status"] == "ok":
+                return {"status": "success", "response": order_result}
+            else:
+                return {"status": "error", "error": order_result.get("response", "Unknown error")}
                 
         except Exception as e:
+            print(f"Order error: {str(e)}")
             return {"status": "error", "error": str(e)}
     
-    def _sign_request(self, data):
-        """
-        Sign the request using HMAC-SHA256
-        """
-        message = json.dumps(data, separators=(',', ':'), sort_keys=True)
-        print(f"Signing message: {message}")
-        signature = hmac.new(
-            bytes(self.secret_key, 'utf-8'),
-            msg=bytes(message, 'utf-8'),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        return signature
-
-    def get_exchange_info(self):
-        """Get exchange meta information"""
-        info_payload = {
-            "type": "meta"
-        }
-        
-        try:
-            response = requests.post(
-                f"{self.base_url}/info",
-                json=info_payload,
-                timeout=10
-            )
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return {"error": f"HTTP {response.status_code}: {response.text}"}
-        except Exception as e:
-            return {"error": str(e)}
-
     def get_user_state(self):
-        """Get user state to verify connection"""
-        info_payload = {
-            "type": "userState",
-            "user": self.wallet_address
-        }
-        
-        # Info endpoints don't need signatures
+        """Get user state"""
         try:
-            response = requests.post(
-                f"{self.base_url}/info",
-                json=info_payload,
-                timeout=10
-            )
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return {"error": f"HTTP {response.status_code}: {response.text}"}
+            user_state = self.info.user_state(self.wallet_address)
+            return user_state
         except Exception as e:
             return {"error": str(e)}
-
-    def get_available_coins(self):
-        """Get list of available trading coins"""
-        info = self.get_exchange_info()
-        if isinstance(info, dict) and 'universe' in info:
-            coins = [item['name'] for item in info['universe']]
-            return coins
-        return []
+    
+    def get_meta(self):
+        """Get exchange metadata"""
+        try:
+            return self.info.meta()
+        except Exception as e:
+            return {"error": str(e)}
