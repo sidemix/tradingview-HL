@@ -74,8 +74,17 @@ class HyperliquidTrader:
             "signature": self._generate_signature(action)
         }
         
+        logger.info(f"Sending exchange request: {request_data}")
         response = requests.post(self.exchange_url, json=request_data)
-        return response.json()
+        
+        # Better error handling for response
+        try:
+            response_data = response.json()
+            logger.info(f"Exchange response: {response_data}")
+            return response_data
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}, Response text: {response.text}")
+            return {"error": f"JSON decode failed: {response.text}"}
 
     def get_asset_index(self, coin: str) -> int:
         """Get asset index for a coin"""
@@ -87,25 +96,31 @@ class HyperliquidTrader:
 
     def place_market_order(self, coin: str, is_buy: bool, size: float) -> dict:
         """Place market order using direct API"""
-        asset_index = self.get_asset_index(coin)
-        
-        order_action = {
-            "type": "order",
-            "orders": [
-                {
-                    "a": asset_index,        # asset index
-                    "b": is_buy,             # isBuy
-                    "p": "0",                # price (0 for market)
-                    "s": str(size),          # size
-                    "r": False,              # reduceOnly
-                    "t": {"limit": {"tif": "Gtc"}}  # order type
-                }
-            ],
-            "grouping": "na"
-        }
-        
-        logger.info(f"Placing market order: {coin} {'BUY' if is_buy else 'SELL'} {size}")
-        return self._exchange_request(order_action)
+        try:
+            asset_index = self.get_asset_index(coin)
+            
+            order_action = {
+                "type": "order",
+                "orders": [
+                    {
+                        "a": asset_index,        # asset index
+                        "b": is_buy,             # isBuy
+                        "p": "0",                # price (0 for market)
+                        "s": str(size),          # size
+                        "r": False,              # reduceOnly
+                        "t": {"limit": {"tif": "Gtc"}}  # order type
+                    }
+                ],
+                "grouping": "na"
+            }
+            
+            logger.info(f"Placing market order: {coin} {'BUY' if is_buy else 'SELL'} {size}")
+            result = self._exchange_request(order_action)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Order placement failed: {e}")
+            return {"error": str(e)}
 
     def get_balance(self) -> float:
         """Get account balance"""
@@ -141,11 +156,17 @@ def tradingview_webhook():
             return jsonify({
                 "status": "demo",
                 "message": f"Alert received: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
-                "note": "Hyperliquid not initialized - check credentials and logs"
+                "note": "Hyperliquid not initialized"
             }), 200
         
         # Execute trade
         result = trader.place_market_order(symbol, is_buy, quantity)
+        
+        if "error" in result:
+            return jsonify({
+                "status": "error",
+                "message": f"Trade failed: {result['error']}"
+            }), 400
         
         return jsonify({
             "status": "success", 
@@ -178,7 +199,7 @@ def home():
             "health": "/health (GET)",
             "webhook": "/webhook/tradingview (POST)"
         },
-        "implementation": "Direct API (no SDK)"
+        "status": "ACTIVE - Ready for TradingView alerts!"
     }), 200
 
 if __name__ == '__main__':
