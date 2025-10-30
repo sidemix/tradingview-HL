@@ -1,14 +1,19 @@
 # webhook_server.py
 from flask import Flask, request, jsonify
-import logging
-import os
-import json
+import logging, os, json
 from dotenv import load_dotenv
 
 # Hyperliquid SDK
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
+
+# Optional: log exact SDK version to avoid constructor ambiguity
+try:
+    from importlib.metadata import version as _pkg_version
+    HL_SDK_VERSION = _pkg_version("hyperliquid-python-sdk")
+except Exception:
+    HL_SDK_VERSION = "unknown"
 
 load_dotenv()
 
@@ -29,16 +34,15 @@ class HyperliquidTrader:
         self.account_address = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS", "").strip()
         self.secret_key = os.getenv("HYPERLIQUID_SECRET_KEY", "").strip()
 
-        # Base URL from SDK constants (never from env)
-        self.base_url = (
-            constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
-        )
+        # Base URL from SDK constants
+        self.base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
 
-        logger.info(f"HL base_url: {self.base_url}")
-        logger.info(f"HL address:  {self.account_address}")
-        logger.info(f"Network:     {'testnet' if self.use_testnet else 'mainnet'}")
+        logger.info(f"HL SDK version: {HL_SDK_VERSION}")
+        logger.info(f"HL base_url:    {self.base_url}")
+        logger.info(f"HL address:     {self.account_address}")
+        logger.info(f"Network:        {'testnet' if self.use_testnet else 'mainnet'}")
 
-        # SDK Info client (HTTP only; no WS)
+        # Info client (HTTP only)
         self.info = Info(self.base_url, skip_ws=True)
 
         # If creds missing, run in demo mode
@@ -55,31 +59,55 @@ class HyperliquidTrader:
             self.initialized = False
             return
 
-        # Try correct constructor first; fall back if SDK variant differs
+        # Try all known constructor signatures for Exchange
+        self.exchange = None
+        ctor_attempts = []
+
+        # A) Newer style (most common): Exchange(base_url, account_address, priv_key, ...)
+        def _ctor_a():
+            return Exchange(self.base_url, self.account_address, self.secret_key)
+
+        # B) Older variant: Exchange(account_address, priv_key, base_url=...)
+        def _ctor_b():
+            return Exchange(self.account_address, self.secret_key, base_url=self.base_url)
+
+        # C) Fully keyworded (if supported): Exchange(base_url=..., account_address=..., priv_key=...)
+        def _ctor_c():
+            return Exchange(base_url=self.base_url, account_address=self.account_address, priv_key=self.secret_key)
+
+        for label, ctor in (("A (base_url, address, priv)", _ctor_a),
+                           ("B (address, priv, base_url=)", _ctor_b),
+                           ("C (kw-args)", _ctor_c)):
+            try:
+                ex = ctor()
+                # Smoke test: ensure it can query Info through its internal client
+                _ = self.info.user_state(self.account_address.lower())
+                self.exchange = ex
+                logger.info(f"✅ Exchange init succeeded using ctor {label}")
+                break
+            except TypeError as te:
+                logger.warning(f"TypeError on Exchange init {label}: {te}")
+                ctor_attempts.append((label, f"TypeError: {te}"))
+            except Exception as e:
+                logger.warning(f"Exchange init {label} failed: {e}")
+                ctor_attempts.append((label, f"Exception: {e}"))
+
+        if not self.exchange:
+            logger.error("❌ All Exchange constructor attempts failed:")
+            for lbl, err in ctor_attempts:
+                logger.error(f"   - {lbl}: {err}")
+            self.initialized = False
+            return
+
+        # If we’re here, exchange is ready; log balance
         try:
-            # ✅ Current SDK: base_url first
-            self.exchange = Exchange(self.base_url, self.account_address, self.secret_key)
             state = self.info.user_state(self.account_address.lower())
             balance = float(state.get("withdrawable", 0)) if state else 0.0
             logger.info(f"✅ Hyperliquid initialized! Balance: {balance}")
             self.initialized = True
-        except TypeError as te:
-            logger.warning(f"TypeError on Exchange init ({te}). Trying alt signature...")
-            try:
-                # Older SDK variant
-                self.exchange = Exchange(self.account_address, self.secret_key, base_url=self.base_url)
-                state = self.info.user_state(self.account_address.lower())
-                balance = float(state.get("withdrawable", 0)) if state else 0.0
-                logger.info(f"✅ Hyperliquid initialized (alt ctor)! Balance: {balance}")
-                self.initialized = True
-            except Exception as e2:
-                logger.exception(f"❌ Failed alt ctor as well: {e2}")
-                self.exchange = None
-                self.initialized = False
         except Exception as e:
-            logger.exception(f"❌ Failed to initialize Hyperliquid SDK: {e}")
-            self.exchange = None
-            self.initialized = False
+            logger.warning(f"Initialized, but failed to read balance: {e}")
+            self.initialized = True
 
     @staticmethod
     def _normalize_symbol(sym: str) -> str:
@@ -102,11 +130,11 @@ class HyperliquidTrader:
 
         coin = self._normalize_symbol(coin)
 
-        # HL enforces min notional (~$10); caller should choose size accordingly.
+        # HL enforces min notional (~$10); caller should choose size accordingly
         order_req = {
             "coin": coin,
             "is_buy": is_buy,
-            "sz": str(size),                  # send as string per HL examples
+            "sz": str(size),                  # as string per HL examples
             "limit_px": "0",                  # '0' with IOC = market
             "reduce_only": reduce_only,
             "order_type": {"limit": {"tif": "Ioc"}},
@@ -129,7 +157,7 @@ trader = HyperliquidTrader()
 @app.route("/webhook/tradingview", methods=["POST"])
 def tradingview_webhook():
     try:
-        # Prefer proper JSON header; be tolerant if missing.
+        # Prefer proper JSON header; be tolerant if missing
         data = request.get_json(silent=True)
         if not data:
             try:
@@ -154,7 +182,7 @@ def tradingview_webhook():
 
         result = trader.place_market_order(symbol, is_buy, qty)
 
-        # SDK typically returns {"status":"ok", "response": {...}} on success
+        # SDK success: {"status":"ok", "response": {...}}
         if isinstance(result, dict) and result.get("status") == "ok":
             return jsonify({
                 "status": "success",
