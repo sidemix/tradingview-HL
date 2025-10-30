@@ -37,9 +37,10 @@ def handle_webhook():
         symbol = data.get('symbol', 'BTC').upper()
         side = data.get('side', '').lower()
         size = float(data.get('size', 0.01))
-        order_type = data.get('order_type', 'market')
+        order_type = data.get('order_type', 'limit')  # Change to limit for testing
+        limit_price = float(data.get('limit_price', 60000))  # Add a reasonable limit price
         
-        print(f"Processing order: {side} {size} {symbol}")
+        print(f"Processing order: {side} {size} {symbol} at {limit_price}")
         
         # Get available coins to verify symbol
         available_coins = hl.get_available_coins()
@@ -69,7 +70,7 @@ def handle_webhook():
         
         # Execute trade on Hyperliquid
         if side in ['buy', 'sell']:
-            result = hl.order(target_coin, side == 'buy', size, order_type)
+            result = hl.order(target_coin, side == 'buy', size, order_type, limit_price)
             print(f"Hyperliquid response: {result}")
             
             if result.get('status') == 'success':
