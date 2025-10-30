@@ -8,7 +8,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize trader
-trader = HyperliquidTrader()
+try:
+    trader = HyperliquidTrader()
+    logger.info("Hyperliquid trader initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize Hyperliquid trader: {e}")
+    trader = None
 
 def parse_tradingview_alert(alert_data: dict) -> dict:
     """Parse TradingView alert data"""
@@ -45,7 +50,19 @@ def parse_tradingview_alert(alert_data: dict) -> dict:
 @app.route('/webhook/tradingview', methods=['POST'])
 def tradingview_webhook():
     try:
+        if trader is None:
+            return jsonify({
+                "status": "error",
+                "message": "Trader not initialized. Check environment variables."
+            }), 500
+            
         data = request.get_json()
+        if not data:
+            return jsonify({
+                "status": "error", 
+                "message": "No JSON data received"
+            }), 400
+            
         logger.info(f"Received TradingView alert: {data}")
         
         # Parse the alert
@@ -83,15 +100,18 @@ def tradingview_webhook():
 
 @app.route('/health', methods=['GET'])
 def health_check():
+    status = "healthy" if trader is not None else "unhealthy"
     return jsonify({
-        "status": "healthy",
-        "account": trader.account_address,
-        "network": "testnet" if trader.use_testnet else "mainnet"
+        "status": status,
+        "account": trader.account_address if trader else "Not configured",
+        "network": "testnet" if trader and trader.use_testnet else "mainnet"
     }), 200
 
 @app.route('/balance', methods=['GET'])
 def get_balance():
     try:
+        if trader is None:
+            return jsonify({"error": "Trader not initialized"}), 400
         balance = trader.check_balance()
         return jsonify({"balance": balance}), 200
     except Exception as e:
