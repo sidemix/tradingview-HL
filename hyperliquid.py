@@ -10,30 +10,28 @@ class Hyperliquid:
         self.secret_key = secret_key
         self.base_url = base_url
         
-    def order(self, coin, is_buy, sz, order_type="market", limit_price=0):
+    def order(self, coin, is_buy, sz, order_type="market", limit_px=0):
         """
-        Place an order on Hyperliquid using correct API format
+        Place an order using Hyperliquid API
         """
-        # Hyperliquid expects specific format
+        # Correct order format based on Hyperliquid API docs
         order_payload = {
             "action": {
                 "type": "order",
                 "orders": [
                     {
-                        "a": coin,  # asset
-                        "b": is_buy,  # is buy
-                        "p": str(limit_price),  # price
-                        "s": str(sz),  # size
-                        "r": True,  # reduce only
-                        "t": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
+                        "coin": coin,
+                        "side": "A" if is_buy else "B",  # A for buy, B for sell
+                        "sz": str(sz),
+                        "limit_px": str(limit_px),
+                        "order_type": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
                     }
                 ]
             }
         }
         
-        print(f"Sending order to Hyperliquid: {json.dumps(order_payload, indent=2)}")
+        print(f"Sending order: {json.dumps(order_payload, indent=2)}")
         
-        # Generate signature
         signature = self._sign_request(order_payload)
         
         headers = {
@@ -48,27 +46,27 @@ class Hyperliquid:
                 headers=headers,
                 timeout=10
             )
-            print(f"Hyperliquid API response status: {response.status_code}")
-            print(f"Hyperliquid API response text: {response.text}")
+            
+            print(f"Response status: {response.status_code}")
+            print(f"Response text: {response.text}")
             
             if response.status_code == 200:
                 try:
-                    return response.json()
+                    response_data = response.json()
+                    return {"status": "success", "response": response_data}
                 except:
-                    return {"status": "ok", "response": response.text}
+                    return {"status": "success", "response": response.text}
             else:
                 return {"status": "error", "error": f"HTTP {response.status_code}: {response.text}"}
                 
-        except requests.exceptions.RequestException as e:
-            print(f"Request error: {str(e)}")
-            return {"status": "error", "error": f"Request failed: {str(e)}"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
     
     def _sign_request(self, data):
         """
         Sign the request using HMAC-SHA256
         """
         message = json.dumps(data, separators=(',', ':'), sort_keys=True)
-        print(f"Signing message: {message}")
         signature = hmac.new(
             bytes(self.secret_key, 'utf-8'),
             msg=bytes(message, 'utf-8'),
