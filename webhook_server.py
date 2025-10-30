@@ -1,9 +1,8 @@
-# webhook_server.py
 from flask import Flask, request, jsonify
 import logging, os, json
 from dotenv import load_dotenv
 
-# ✔ NEW: Hyperliquid SDK
+# Hyperliquid SDK
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
@@ -19,13 +18,11 @@ class HyperliquidTrader:
         self.use_testnet = os.getenv("USE_TESTNET", "true").lower() == "true"
         self.account_address = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS", "")
         self.secret_key = os.getenv("HYPERLIQUID_SECRET_KEY", "")
+        self.base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
 
-        self.base_url = (
-            constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
-        )
-
-        # ✔ Use SDK clients
+        # SDK clients
         self.info = Info(self.base_url, skip_ws=True)
+
         if not self.account_address or not self.secret_key:
             logger.warning("Hyperliquid credentials not set - running in demo mode")
             self.exchange = None
@@ -34,7 +31,6 @@ class HyperliquidTrader:
 
         try:
             self.exchange = Exchange(self.account_address, self.secret_key, base_url=self.base_url)
-            # Smoke test: fetch user state
             state = self.info.user_state(self.account_address.lower())
             balance = float(state.get("withdrawable", 0)) if state else 0.0
             logger.info(f"✅ Hyperliquid initialized! Balance: {balance}")
@@ -44,37 +40,20 @@ class HyperliquidTrader:
             self.exchange = None
             self.initialized = False
 
-    def name_to_asset(self, coin: str) -> int:
-        """Resolve 'BTC' -> asset index using SDK meta (perps)."""
-        meta = self.info.meta()
-        for idx, a in enumerate(meta["universe"]):
-            if a["name"].upper() == coin.upper():
-                return idx
-        raise ValueError(f"Coin {coin} not found")
-
     def place_market_order(self, coin: str, is_buy: bool, size: float, reduce_only: bool=False):
-        """
-        Submit a market order using SDK. HL "market" is represented as limit tif IOC with price '0'.
-        The SDK handles action canonicalization + signing.
-        """
         if not self.exchange:
             return {"error": "Exchange not initialized"}
 
-        # HL min notional is ~$10 – you may enforce that here if desired.
         order_req = {
-            "coin": coin.upper(),
+            "coin": coin.upper().replace("/USD", "").replace("-PERP", ""),
             "is_buy": is_buy,
             "sz": str(size),
-            "limit_px": "0",              # market via IOC + px 0
+            "limit_px": "0",                       # market via IOC
             "reduce_only": reduce_only,
-            "order_type": {"limit": {"tif": "Ioc"}},
-            # Optional: "cloid": "0x..." for idempotency
+            "order_type": {"limit": {"tif": "Ioc"}}
         }
-
-        logger.info(f"Placing market order via SDK: {coin} {'BUY' if is_buy else 'SELL'} {size}")
-        # The SDK takes either a single order or a list; here we submit one.
-        resp = self.exchange.order(order_req, grouping="na")
-        return resp
+        logger.info(f"Placing order via SDK: {order_req}")
+        return self.exchange.order(order_req, grouping="na")
 
     def get_balance(self) -> float:
         try:
@@ -88,45 +67,36 @@ trader = HyperliquidTrader()
 @app.route('/webhook/tradingview', methods=['POST'])
 def tradingview_webhook():
     try:
-        # Make parsing resilient, but still prefer proper Content-Type: application/json
-        data = request.get_json(silent=True, force=False)
+        data = request.get_json(silent=True)
         if not data:
-            # Try fallback for misconfigured senders
+            # Fallback if sender forgot Content-Type header
             try:
                 data = json.loads(request.data.decode('utf-8'))
             except Exception:
                 return jsonify({"status": "error", "message": "No JSON data received"}), 400
 
         logger.info(f"Received TradingView alert: {data}")
-
-        # Parse alert
-        symbol = str(data.get('symbol', 'BTC')).upper().replace("/USD", "").replace("-PERP", "")
+        symbol = str(data.get('symbol', 'BTC')).upper()
         action = str(data.get('action', 'buy')).lower()
-        quantity = float(data.get('quantity', 0.001))
+        qty = float(data.get('quantity', 0.001))
         is_buy = action in ('buy', 'long')
 
         if not trader.initialized:
             return jsonify({
                 "status": "demo",
-                "message": f"[DEMO] {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
+                "message": f"[DEMO] {symbol} {'BUY' if is_buy else 'SELL'} {qty}",
                 "note": "Hyperliquid not initialized"
             }), 200
 
-        # Execute trade via SDK
-        result = trader.place_market_order(symbol, is_buy, quantity)
+        result = trader.place_market_order(symbol, is_buy, qty)
 
-        # SDK returns {'status': 'ok', 'response': {...}} or raises
         if not isinstance(result, dict) or result.get("status") != "ok":
-            return jsonify({
-                "status": "error",
-                "message": "Trade failed",
-                "result": result,
-            }), 400
+            return jsonify({"status": "error", "message": "Trade failed", "result": result}), 400
 
         return jsonify({
             "status": "success",
-            "message": f"Trade executed: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
-            "result": result,
+            "message": f"Trade executed: {symbol} {'BUY' if is_buy else 'SELL'} {qty}",
+            "result": result
         }), 200
 
     except Exception as e:
@@ -152,6 +122,5 @@ def home():
     }), 200
 
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
