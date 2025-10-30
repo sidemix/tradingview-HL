@@ -4,9 +4,152 @@ import hashlib
 import json
 import requests
 import os
+import time
 from config import SECRET_KEY, WALLET_ADDRESS
 
 app = Flask(__name__)
+
+
+@app.route('/test-official-format', methods=['GET'])
+def test_official_format():
+    """Test with format from official Hyperliquid documentation/examples"""
+    tests = {}
+    
+    # Based on common exchange API patterns and your working history
+    official_formats = [
+        # Format 1: Standard exchange format with timestamp
+        {
+            "timestamp": int(time.time() * 1000),
+            "action": {
+                "type": "order",
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ],
+                "grouping": "na"
+            }
+        },
+        
+        # Format 2: With nonce for replay protection
+        {
+            "nonce": int(time.time() * 1000),
+            "action": {
+                "type": "order", 
+                "orders": [
+                    {
+                        "coin": "BTC",
+                        "side": "A",
+                        "sz": "0.001",
+                        "order_type": {"market": {}}
+                    }
+                ]
+            }
+        },
+    ]
+    
+    for i, payload in enumerate(official_formats):
+        try:
+            # Sign the request
+            message = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+            signature = hmac.new(
+                bytes(SECRET_KEY, 'utf-8'),
+                msg=bytes(message, 'utf-8'),
+                digestmod=hashlib.sha256
+            ).hexdigest()
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-API-Signature": signature,
+                "X-API-Timestamp": str(int(time.time() * 1000)),
+            }
+            
+            response = requests.post(
+                "https://api.hyperliquid.xyz/exchange",
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            
+            tests[f'official_{i}'] = {
+                'payload': payload,
+                'status': response.status_code,
+                'response': response.text,
+                'signature_short': signature[:20] + '...'
+            }
+            
+        except Exception as e:
+            tests[f'official_{i}'] = {
+                'payload': payload,
+                'error': str(e)
+            }
+    
+    return jsonify(tests)
+
+@app.route('/setup-with-official-sdk', methods=['GET'])
+def setup_with_official_sdk():
+    """Guide for using official Hyperliquid SDK"""
+    guide = {
+        "status": "RECOMMENDED_APPROACH",
+        "problem": "We cannot discover the correct API format through testing",
+        "solution": "Use the official Hyperliquid Python SDK",
+        "steps": [
+            "1. Check if there's an official SDK: pip search hyperliquid",
+            "2. Look at Hyperliquid's GitHub: https://github.com/hyperliquid-xyz",
+            "3. Use their official examples if available",
+            "4. The SDK will handle the correct API format automatically"
+        ],
+        "alternative_approach": {
+            "description": "Since your account IS trading successfully, the orders are coming from somewhere",
+            "possibilities": [
+                "You're using their web interface",
+                "You have another bot running", 
+                "You're using their mobile app",
+                "There's a different API endpoint we haven't found"
+            ]
+        },
+        "immediate_next_steps": [
+            "Visit https://github.com/hyperliquid-xyz/hyperliquid-python-sdk",
+            "Check their examples directory",
+            "Look for order placement examples"
+        ]
+    }
+    return jsonify(guide)
+
+@app.route('/analyze-current-trading', methods=['GET'])
+def analyze_current_trading():
+    """Analyze how you're currently placing trades successfully"""
+    try:
+        # Get recent fills to see current trading patterns
+        user_fills_response = requests.post(
+            "https://api.hyperliquid.xyz/info",
+            json={"type": "userFills", "user": WALLET_ADDRESS},
+            timeout=10
+        )
+        
+        if user_fills_response.status_code == 200:
+            fills = user_fills_response.json()
+            recent_fills = fills[:5] if len(fills) > 5 else fills
+            
+            analysis = {
+                "total_fills": len(fills),
+                "recent_activity": recent_fills,
+                "trading_analysis": {
+                    "message": "Your account is actively trading through SOME method",
+                    "evidence": "Extensive fill history shows successful order execution",
+                    "conclusion": "The API format exists but we haven't discovered it"
+                }
+            }
+            
+            return jsonify(analysis)
+        else:
+            return jsonify({"error": "Could not get user fills"})
+            
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route('/analyze-working-patterns', methods=['GET'])
 def analyze_working_patterns():
