@@ -85,6 +85,21 @@ def handle_webhook():
         print(f"Error processing webhook: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/symbols', methods=['GET'])
+def get_symbols():
+    """Get available symbols from Hyperliquid"""
+    try:
+        exchange_info = hl.get_exchange_info()
+        return jsonify({
+            "status": "success",
+            "symbols": exchange_info
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"})
