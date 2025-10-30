@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import hmac
 import hashlib
 import json
-import requests  # Add this import
+import requests
 from hyperliquid import Hyperliquid
 import os
 from config import SECRET_KEY, WALLET_ADDRESS
@@ -169,28 +169,16 @@ def test_user_state():
         
         print(f"Testing user state with: {user_state_payload}")
         
-        signature = hmac.new(
-            bytes(SECRET_KEY, 'utf-8'),
-            msg=bytes(json.dumps(user_state_payload, separators=(',', ':'), sort_keys=True), 'utf-8'),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Signature": signature
-        }
-        
+        # Info endpoints don't need signatures
         response = requests.post(
             "https://api.hyperliquid.xyz/info",
             json=user_state_payload,
-            headers=headers,
             timeout=10
         )
         
         return jsonify({
             "status": response.status_code,
             "response": response.text,
-            "headers_sent": dict(headers),
             "payload": user_state_payload
         })
         
