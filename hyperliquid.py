@@ -12,21 +12,25 @@ class Hyperliquid:
         
     def order(self, coin, is_buy, sz, order_type="market", limit_px=0):
         """
-        Place an order using Hyperliquid API - CORRECT FORMAT per docs
+        Place an order using Hyperliquid API - CORRECT FORMAT
         """
+        # Create the base order structure
+        order = {
+            "coin": coin,
+            "side": "A" if is_buy else "B",
+            "sz": str(sz),
+            "order_type": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
+        }
+        
+        # Only add limit_px for limit orders
+        if order_type == "limit":
+            order["limit_px"] = str(limit_px)
+        
         # CORRECT order format from Hyperliquid documentation
         order_payload = {
             "action": {
                 "type": "order",
-                "orders": [
-                    {
-                        "coin": coin,
-                        "side": "A" if is_buy else "B",  # A for buy, B for sell
-                        "sz": str(sz),  # Size as string
-                        "limit_px": str(limit_px),  # Price as string
-                        "order_type": {"limit": {"tif": "Gtc"}} if order_type == "limit" else {"market": {}}
-                    }
-                ],
+                "orders": [order],
                 "grouping": "na"
             }
         }
@@ -56,7 +60,7 @@ class Hyperliquid:
                 try:
                     response_data = response.json()
                     # Check if order was successful
-                    if "status" in response_data and response_data["status"] == "ok":
+                    if response_data.get("status") == "ok":
                         return {"status": "success", "response": response_data}
                     else:
                         return {"status": "error", "error": response_data}
