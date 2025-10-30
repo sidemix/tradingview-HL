@@ -21,11 +21,12 @@ class HyperliquidTrader:
             raise ValueError("Missing required environment variables")
         
         # Initialize Hyperliquid clients
-        self.info = Info(constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL, skip_ws=True)
+        base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
+        self.info = Info(base_url, skip_ws=True)
         self.exchange = Exchange(
-            self.account_address, 
-            self.secret_key, 
-            base_url=constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
+            wallet=self.account_address, 
+            secret_key=self.secret_key, 
+            base_url=base_url
         )
         
         logger.info(f"Initialized Hyperliquid trader for {self.account_address} on {'testnet' if self.use_testnet else 'mainnet'}")
@@ -40,8 +41,6 @@ class HyperliquidTrader:
 
     def place_market_order(self, coin: str, is_buy: bool, size: float) -> dict:
         """Place market order"""
-        asset_index = self.get_asset_index(coin)
-        
         order_result = self.exchange.order(
             coin, 
             is_buy, 
@@ -55,8 +54,6 @@ class HyperliquidTrader:
 
     def place_limit_order(self, coin: str, is_buy: bool, size: float, price: float) -> dict:
         """Place limit order"""
-        asset_index = self.get_asset_index(coin)
-        
         order_result = self.exchange.order(
             coin,
             is_buy,
