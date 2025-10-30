@@ -24,7 +24,13 @@ class HyperliquidTrader:
         try:
             base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
             self.info = Info(base_url, skip_ws=True)
-            self.exchange = Exchange(self.account_address, self.secret_key, base_url=base_url)
+            
+            # CORRECT Exchange initialization - check SDK documentation
+            self.exchange = Exchange(
+                self.account_address,  # wallet address
+                self.secret_key,       # private key
+                base_url=base_url
+            )
             logger.info("Hyperliquid trader initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize Hyperliquid: {e}")
@@ -40,8 +46,11 @@ class HyperliquidTrader:
     def get_balance(self):
         if not self.info:
             return 0
-        user_state = self.info.user_state(self.account_address)
-        return float(user_state["withdrawable"])
+        try:
+            user_state = self.info.user_state(self.account_address)
+            return float(user_state["withdrawable"])
+        except:
+            return 0
 
 # Initialize trader
 trader = HyperliquidTrader()
@@ -67,14 +76,13 @@ def tradingview_webhook():
             return jsonify({
                 "status": "demo",
                 "message": f"Alert received: {symbol} {'BUY' if is_buy else 'SELL'} {quantity}",
-                "note": "Trading disabled - check Hyperliquid credentials"
+                "note": "Set HYPERLIQUID_ACCOUNT_ADDRESS and HYPERLIQUID_SECRET_KEY environment variables"
             }), 200
         
         # Execute trade
         if order_type == 'market':
             result = trader.place_market_order(symbol, is_buy, quantity)
         else:
-            # For limit orders, you'd need price
             price = float(data.get('price', 0))
             if price <= 0:
                 return jsonify({"status": "error", "message": "Price required for limit orders"}), 400
@@ -93,7 +101,7 @@ def tradingview_webhook():
 @app.route('/health', methods=['GET'])
 def health_check():
     trading_status = "active" if trader.exchange else "demo"
-    balance = trader.get_balance() if trader.exchange else 0
+    balance = trader.get_balance()
     return jsonify({
         "status": "healthy",
         "trading": trading_status,
@@ -107,8 +115,7 @@ def home():
         "message": "TradingView to Hyperliquid Webhook Server",
         "endpoints": {
             "health": "/health (GET)",
-            "webhook": "/webhook/tradingview (POST)",
-            "usage": "Send POST requests to /webhook/tradingview with JSON payload"
+            "webhook": "/webhook/tradingview (POST)"
         },
         "example_payload": {
             "symbol": "BTC",
