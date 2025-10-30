@@ -30,7 +30,7 @@ class HyperliquidTrader:
             return
 
         try:
-            self.exchange = Exchange(self.account_address, self.secret_key, base_url=self.base_url)
+            self.exchange = Exchange(self.base_url, self.account_address, self.secret_key)
             state = self.info.user_state(self.account_address.lower())
             balance = float(state.get("withdrawable", 0)) if state else 0.0
             logger.info(f"✅ Hyperliquid initialized! Balance: {balance}")
