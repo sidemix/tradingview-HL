@@ -1,19 +1,47 @@
 # webhook_server.py
 from flask import Flask, request, jsonify
-import logging, os, json
+import logging, os, json, time
 from dotenv import load_dotenv
+import inspect
 
 # Hyperliquid SDK
 from hyperliquid.info import Info
-from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 
-# Optional: log SDK version
+# Optional: show SDK version in logs
 try:
     from importlib.metadata import version as _pkg_version
     HL_SDK_VERSION = _pkg_version("hyperliquid-python-sdk")
 except Exception:
     HL_SDK_VERSION = "unknown"
+
+# Some SDKs expose Exchange + a Wallet/signer; import defensively
+Exchange = None
+Wallet = None
+sign_l1_action = None
+
+try:
+    from hyperliquid.exchange import Exchange as _Exchange
+    Exchange = _Exchange
+except Exception:
+    pass
+
+# Two signer shapes seen across versions:
+#  - hyperliquid.utils.wallet.Wallet(...).sign_l1_action(...)
+#  - hyperliquid.utils.signing.sign_l1_action(...)
+try:
+    from hyperliquid.utils.wallet import Wallet as _Wallet
+    Wallet = _Wallet
+except Exception:
+    pass
+
+try:
+    from hyperliquid.utils.signing import sign_l1_action as _sign_l1_action
+    sign_l1_action = _sign_l1_action
+except Exception:
+    pass
+
+import requests
 
 load_dotenv()
 
@@ -29,6 +57,8 @@ class HyperliquidTrader:
         self.account_address = (os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS") or "").strip()
         self.secret_key = (os.getenv("HYPERLIQUID_SECRET_KEY") or "").strip()
         self.base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
+        self.info_url = f"{self.base_url}/info"
+        self.exchange_url = f"{self.base_url}/exchange"
 
         logger.info(f"HL SDK version: {HL_SDK_VERSION}")
         logger.info(f"HL base_url:    {self.base_url}")
@@ -37,68 +67,96 @@ class HyperliquidTrader:
 
         self.info = Info(self.base_url, skip_ws=True)
 
+        # If creds missing, we must run in demo mode.
         if not self.account_address or not self.secret_key:
             logger.warning("Hyperliquid credentials not set — running in DEMO mode")
             self.exchange = None
             self.initialized = False
             return
 
-        if not isinstance(self.base_url, str) or not self.base_url.startswith("http"):
-            logger.error(f"BAD base_url detected: {self.base_url}")
-            self.exchange = None
-            self.initialized = False
-            return
-
-        # Try known constructor permutations (no 'info=' for v0.20.0)
-        attempts = []
-
-        def ctor_A():
-            # Most likely for recent versions: (account, priv, base_url) all positional
-            return Exchange(self.account_address, self.secret_key, self.base_url)
-
-        def ctor_B():
-            # Alt older variant: (account, priv, base_url=...) keyworded
-            return Exchange(self.account_address, self.secret_key, base_url=self.base_url)
-
-        def ctor_C():
-            # Rare variant: (base_url, account, priv) positional (seen in some forks)
-            return Exchange(self.base_url, self.account_address, self.secret_key)
-
+        # Try to build Exchange using introspection (works across wonky SDK variants)
         self.exchange = None
-        for label, ctor in (
-            ("A account,priv,base_url(positional)", ctor_A),
-            ("B account,priv,base_url=keyword", ctor_B),
-            ("C base_url,account,priv(positional)", ctor_C),
-        ):
-            try:
-                ex = ctor()
-                # Smoke test: make sure requests layer works
-                _ = self.info.user_state(self.account_address.lower())
-                self.exchange = ex
-                logger.info(f"✅ Exchange init succeeded using ctor: {label}")
-                break
-            except TypeError as te:
-                logger.warning(f"TypeError on Exchange init ({label}): {te}")
-                attempts.append((label, f"TypeError: {te}"))
-            except Exception as e:
-                logger.warning(f"Exchange init failed ({label}): {e}")
-                attempts.append((label, f"Exception: {e}"))
+        if Exchange is not None:
+            self.exchange = self._init_exchange_dynamic()
 
-        if not self.exchange:
-            logger.error("❌ All Exchange constructor attempts failed:")
-            for lbl, err in attempts:
-                logger.error(f"   - {lbl}: {err}")
+        # If Exchange couldn’t be created, we can still place orders via raw signed HTTP
+        # as long as we can sign actions (Wallet or sign_l1_action present).
+        if not self.exchange and not (Wallet or sign_l1_action):
+            logger.error("❌ No working Exchange constructor and no signer available — DEMO mode.")
             self.initialized = False
             return
 
+        # Smoke test (balance)
         try:
             st = self.info.user_state(self.account_address.lower())
             balance = float(st.get("withdrawable", 0)) if st else 0.0
-            logger.info(f"✅ Hyperliquid initialized! Balance: {balance}")
+            logger.info(f"✅ Hyperliquid ready! Balance: {balance} (mode: {'SDK' if self.exchange else 'HTTP-signed'})")
             self.initialized = True
         except Exception as e:
-            logger.warning(f"Initialized, but failed to read balance: {e}")
+            logger.warning(f"Ready, but failed to read balance: {e}")
             self.initialized = True
+
+    def _init_exchange_dynamic(self):
+        """Make a best-effort attempt to construct Exchange regardless of SDK arg order."""
+        sig = inspect.signature(Exchange.__init__)
+        params = [p.name for p in sig.parameters.values()]  # includes 'self'
+        param_set = set(params)
+
+        # Build kwargs using real parameter names if they exist
+        kw = {}
+        # Try to identify keys by common names across releases
+        addr_keys = ["account_address", "address", "account", "addr"]
+        priv_keys = ["priv_key", "private_key", "secret_key", "secret", "key"]
+        base_keys = ["base_url", "url"]
+
+        addr_key = next((k for k in addr_keys if k in param_set), None)
+        priv_key = next((k for k in priv_keys if k in param_set), None)
+        base_key = next((k for k in base_keys if k in param_set), None)
+
+        # Preferred: keyword-only if possible
+        if addr_key and priv_key and base_key:
+            try:
+                ex = Exchange(**{
+                    addr_key: self.account_address,
+                    priv_key: self.secret_key,
+                    base_key: self.base_url
+                })
+                logger.info("✅ Exchange init succeeded via keyword mapping")
+                return ex
+            except Exception as e:
+                logger.warning(f"Keyword mapping failed: {e}")
+
+        # Otherwise, try sensible positional permutations
+        attempts = []
+
+        def try_ctor(args, label):
+            try:
+                ex = Exchange(*args)
+                logger.info(f"✅ Exchange init succeeded via positional ctor: {label}")
+                return ex
+            except TypeError as te:
+                logger.warning(f"TypeError positional ctor {label}: {te}")
+                attempts.append((label, f"TypeError: {te}"))
+            except Exception as e:
+                logger.warning(f"Exchange positional ctor {label} failed: {e}")
+                attempts.append((label, f"Exception: {e}"))
+            return None
+
+        # Common permutations seen in the wild
+        for label, args in [
+            ("[base, addr, priv]", (self.base_url, self.account_address, self.secret_key)),
+            ("[addr, priv, base]", (self.account_address, self.secret_key, self.base_url)),
+            ("[addr, priv]", (self.account_address, self.secret_key)),  # some versions infer base_url
+            ("[base, priv, addr]", (self.base_url, self.secret_key, self.account_address)),
+        ]:
+            ex = try_ctor(args, label)
+            if ex:
+                return ex
+
+        logger.error("❌ All Exchange constructor attempts failed:")
+        for lbl, err in attempts:
+            logger.error(f"   - {lbl}: {err}")
+        return None
 
     @staticmethod
     def _normalize_symbol(sym: str) -> str:
@@ -113,42 +171,84 @@ class HyperliquidTrader:
         except Exception:
             return 0.0
 
+    # ---------- Order paths ----------
     def market_order(self, coin: str, is_buy: bool, sz: float, slippage: float = 0.01):
-        """
-        Market-like order. If market_open is missing in your SDK, we fall back to limit_px='0' + IOC.
-        """
-        if not self.exchange:
-            return {"status": "error", "message": "Exchange not initialized"}
-
+        """Prefer SDK .market_open if available; else IOC market-equivalent; else raw signed HTTP."""
         coin = self._normalize_symbol(coin)
 
-        # Prefer market_open if available on this SDK
-        if hasattr(self.exchange, "market_open"):
-            try:
-                logger.info(f"Submitting market_open: {coin} {'BUY' if is_buy else 'SELL'} {sz}")
-                return self.exchange.market_open(coin, is_buy, sz, None, slippage)
-            except Exception as e:
-                logger.warning(f"market_open failed, falling back to raw order: {e}")
+        # Path 1: SDK methods
+        if self.exchange:
+            if hasattr(self.exchange, "market_open"):
+                try:
+                    logger.info(f"Submitting market_open: {coin} {'BUY' if is_buy else 'SELL'} {sz}")
+                    return self.exchange.market_open(coin, is_buy, sz, None, slippage)
+                except Exception as e:
+                    logger.warning(f"market_open failed, falling back to raw order: {e}")
 
-        order_req = {
-            "coin": coin,
-            "is_buy": is_buy,
-            "sz": str(sz),
-            "limit_px": "0",
-            "reduce_only": False,
-            "order_type": {"limit": {"tif": "Ioc"}},
+            # Fall back to raw order via SDK client
+            order_req = {
+                "coin": coin,
+                "is_buy": is_buy,
+                "sz": str(sz),
+                "limit_px": "0",
+                "reduce_only": False,
+                "order_type": {"limit": {"tif": "Ioc"}},
+            }
+            logger.info(f"Submitting IOC market-equivalent (SDK): {order_req}")
+            try:
+                return self.exchange.order(order_req, grouping="na")
+            except Exception as e:
+                logger.warning(f"SDK order() failed: {e} — trying HTTP-signed")
+
+        # Path 2: HTTP signed using SDK signer (Wallet or sign_l1_action)
+        if not (Wallet or sign_l1_action):
+            return {"status": "error", "message": "No signing available"}
+
+        action = {
+            "type": "order",
+            "orders": [{
+                "a": self._asset_index(coin),
+                "b": bool(is_buy),
+                "p": "0",
+                "s": str(sz),
+                "r": False,
+                "t": {"limit": {"tif": "Ioc"}}
+            }],
+            "grouping": "na"
         }
-        logger.info(f"Submitting IOC market-equivalent order: {order_req}")
+        nonce = int(time.time() * 1000)
+
         try:
-            return self.exchange.order(order_req, grouping="na")
+            if Wallet is not None:
+                w = Wallet(self.account_address, self.secret_key)
+                sig = w.sign_l1_action(action, nonce)
+            else:
+                # Some SDKs expose a module-level signer
+                sig = sign_l1_action(self.account_address, self.secret_key, action, nonce)
+
+            body = {"action": action, "nonce": nonce, "signature": sig}
+            logger.info(f"Submitting IOC market-equivalent (HTTP-signed)")
+            r = requests.post(self.exchange_url, json=body, timeout=10)
+            if r.headers.get("content-type", "").startswith("application/json"):
+                return r.json()
+            return {"status": "error", "message": f"{r.status_code} {r.text}"}
         except Exception as e:
-            logger.exception("exchange.order failed")
+            logger.exception("HTTP-signed order failed")
             return {"status": "error", "message": str(e)}
+
+    def _asset_index(self, coin: str) -> int:
+        meta = self.info.meta()
+        for i, a in enumerate(meta.get("universe", [])):
+            if a.get("name", "").upper() == coin.upper():
+                return i
+        # Basic fallback: many testnets put BTC at index 3, but don't rely on it
+        raise ValueError(f"Asset not found: {coin}")
 
 
 trader = HyperliquidTrader()
 
 
+# ---------- Routes ----------
 @app.route("/webhook/tradingview", methods=["POST"])
 def tradingview_webhook():
     try:
@@ -203,7 +303,7 @@ def health_check():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "message": "TradingView ➜ Hyperliquid Webhook Server (SDK)",
+        "message": "TradingView ➜ Hyperliquid Webhook Server (SDK/HTTP auto)",
         "endpoints": {"health": "/health (GET)", "webhook": "/webhook/tradingview (POST)"},
         "status": "ACTIVE"
     }), 200
