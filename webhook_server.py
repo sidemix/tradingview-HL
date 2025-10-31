@@ -1,13 +1,14 @@
+# webhook_server.py
 from flask import Flask, request, jsonify
 import logging, os, json
 from dotenv import load_dotenv
 
-# HL SDK
+# Hyperliquid SDK
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 
-# Optional: show installed SDK version in logs
+# Optional: log SDK version
 try:
     from importlib.metadata import version as _pkg_version
     HL_SDK_VERSION = _pkg_version("hyperliquid-python-sdk")
@@ -34,32 +35,70 @@ class HyperliquidTrader:
         logger.info(f"HL address:     {self.account_address}")
         logger.info(f"Network:        {'testnet' if self.use_testnet else 'mainnet'}")
 
-        # Always create Info for reads
         self.info = Info(self.base_url, skip_ws=True)
 
-        # Run in demo mode if creds are missing
         if not self.account_address or not self.secret_key:
             logger.warning("Hyperliquid credentials not set — running in DEMO mode")
             self.exchange = None
             self.initialized = False
             return
 
-        # Correct constructor: positional (address, secret), keyword (info=…, base_url=…)
+        if not isinstance(self.base_url, str) or not self.base_url.startswith("http"):
+            logger.error(f"BAD base_url detected: {self.base_url}")
+            self.exchange = None
+            self.initialized = False
+            return
+
+        # Try known constructor permutations (no 'info=' for v0.20.0)
+        attempts = []
+
+        def ctor_A():
+            # Most likely for recent versions: (account, priv, base_url) all positional
+            return Exchange(self.account_address, self.secret_key, self.base_url)
+
+        def ctor_B():
+            # Alt older variant: (account, priv, base_url=...) keyworded
+            return Exchange(self.account_address, self.secret_key, base_url=self.base_url)
+
+        def ctor_C():
+            # Rare variant: (base_url, account, priv) positional (seen in some forks)
+            return Exchange(self.base_url, self.account_address, self.secret_key)
+
+        self.exchange = None
+        for label, ctor in (
+            ("A account,priv,base_url(positional)", ctor_A),
+            ("B account,priv,base_url=keyword", ctor_B),
+            ("C base_url,account,priv(positional)", ctor_C),
+        ):
+            try:
+                ex = ctor()
+                # Smoke test: make sure requests layer works
+                _ = self.info.user_state(self.account_address.lower())
+                self.exchange = ex
+                logger.info(f"✅ Exchange init succeeded using ctor: {label}")
+                break
+            except TypeError as te:
+                logger.warning(f"TypeError on Exchange init ({label}): {te}")
+                attempts.append((label, f"TypeError: {te}"))
+            except Exception as e:
+                logger.warning(f"Exchange init failed ({label}): {e}")
+                attempts.append((label, f"Exception: {e}"))
+
+        if not self.exchange:
+            logger.error("❌ All Exchange constructor attempts failed:")
+            for lbl, err in attempts:
+                logger.error(f"   - {lbl}: {err}")
+            self.initialized = False
+            return
+
         try:
-            self.exchange = Exchange(self.account_address, self.secret_key, info=self.info, base_url=self.base_url)
-            # Smoke test (balance)
             st = self.info.user_state(self.account_address.lower())
             balance = float(st.get("withdrawable", 0)) if st else 0.0
             logger.info(f"✅ Hyperliquid initialized! Balance: {balance}")
             self.initialized = True
-        except TypeError as te:
-            logger.error(f"❌ Exchange init TypeError: {te}")
-            self.exchange = None
-            self.initialized = False
         except Exception as e:
-            logger.exception("❌ Exchange init failed")
-            self.exchange = None
-            self.initialized = False
+            logger.warning(f"Initialized, but failed to read balance: {e}")
+            self.initialized = True
 
     @staticmethod
     def _normalize_symbol(sym: str) -> str:
@@ -76,20 +115,34 @@ class HyperliquidTrader:
 
     def market_order(self, coin: str, is_buy: bool, sz: float, slippage: float = 0.01):
         """
-        Market-equivalent via SDK convenience:
-        - market_open uses aggressive limit + IOC under the hood.
+        Market-like order. If market_open is missing in your SDK, we fall back to limit_px='0' + IOC.
         """
         if not self.exchange:
             return {"status": "error", "message": "Exchange not initialized"}
 
         coin = self._normalize_symbol(coin)
+
+        # Prefer market_open if available on this SDK
+        if hasattr(self.exchange, "market_open"):
+            try:
+                logger.info(f"Submitting market_open: {coin} {'BUY' if is_buy else 'SELL'} {sz}")
+                return self.exchange.market_open(coin, is_buy, sz, None, slippage)
+            except Exception as e:
+                logger.warning(f"market_open failed, falling back to raw order: {e}")
+
+        order_req = {
+            "coin": coin,
+            "is_buy": is_buy,
+            "sz": str(sz),
+            "limit_px": "0",
+            "reduce_only": False,
+            "order_type": {"limit": {"tif": "Ioc"}},
+        }
+        logger.info(f"Submitting IOC market-equivalent order: {order_req}")
         try:
-            logger.info(f"Submitting market order: {coin} {'BUY' if is_buy else 'SELL'} {sz} (slip={slippage})")
-            # market_open(coin, is_buy, sz, cloid, slippage)
-            resp = self.exchange.market_open(coin, is_buy, sz, None, slippage)
-            return resp
+            return self.exchange.order(order_req, grouping="na")
         except Exception as e:
-            logger.exception("exchange.market_open failed")
+            logger.exception("exchange.order failed")
             return {"status": "error", "message": str(e)}
 
 
@@ -129,11 +182,7 @@ def tradingview_webhook():
                 "result": result
             }), 200
 
-        return jsonify({
-            "status": "error",
-            "message": "Trade failed",
-            "result": result
-        }), 400
+        return jsonify({"status": "error", "message": "Trade failed", "result": result}), 400
 
     except Exception as e:
         logger.exception("Webhook error")
