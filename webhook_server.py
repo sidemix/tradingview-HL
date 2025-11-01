@@ -58,25 +58,20 @@ class HyperliquidTrader:
             self.initialized = False
             return
 
+        # Best-effort Exchange init (not required; we’ll use HTTP-signed path)
         self.exchange = None
         if Exchange:
-            self.exchange = self._init_exchange_dynamic()
+            try:
+                # Some SDKs accept this order; if not, it will be ignored (we're using HTTP path anyway)
+                self.exchange = Exchange(self.base_url, self.account_address, self.secret_key)
+            except Exception:
+                self.exchange = None
 
-        if not self.exchange and not (Wallet or sign_l1_action):
-            logger.error("❌ No Exchange or signer available — DEMO mode.")
-            self.initialized = False
-            return
-
+        # Verify connection
         st = self.info.user_state(self.account_address.lower())
         balance = float(st.get("withdrawable", 0)) if st else 0.0
         logger.info(f"✅ Hyperliquid ready! Balance: {balance} (mode: {'SDK' if self.exchange else 'HTTP-signed'})")
         self.initialized = True
-
-    def _init_exchange_dynamic(self):
-        try:
-            return Exchange(self.base_url, self.account_address, self.secret_key)
-        except Exception:
-            return None
 
     @staticmethod
     def _normalize_symbol(sym: str) -> str:
@@ -89,12 +84,66 @@ class HyperliquidTrader:
         except Exception:
             return 0.0
 
+    def _asset_index(self, coin: str) -> int:
+        meta = self.info.meta()
+        for i, a in enumerate(meta.get("universe", [])):
+            if a.get("name", "").upper() == coin.upper():
+                return i
+        raise ValueError(f"Asset not found: {coin}")
+
+    def _sign_action(self, action: dict, nonce: int):
+        """
+        Robust signer that supports multiple SDK signatures:
+        1) Wallet.sign_l1_action(action, nonce, expires_after_ms, is_mainnet)
+        2) sign_l1_action(address, priv, action, nonce, expires_after_ms, is_mainnet)
+        3) sign_l1_action(address, priv, action, 'perp', nonce, expires_after_ms)
+        4) sign_l1_action(address, priv, action, 'perp', nonce, expires_after_ms, is_mainnet)
+        """
+        expires_after_ms = 45_000
+        is_mainnet = not self.use_testnet
+        addr = self.account_address
+        priv = self.secret_key
+
+        # Variant 1: Wallet signer
+        if Wallet:
+            try:
+                w = Wallet(addr, priv)
+                return w.sign_l1_action(action, nonce, expires_after_ms, is_mainnet)
+            except TypeError:
+                pass
+            except Exception as e:
+                logger.warning(f"Wallet signer failed: {e}")
+
+        # Variant 2: Module signer (common)
+        if sign_l1_action:
+            # Try (addr, priv, action, nonce, expires, is_mainnet)
+            try:
+                return sign_l1_action(addr, priv, action, nonce, expires_after_ms, is_mainnet)
+            except TypeError:
+                pass
+            except Exception as e:
+                logger.warning(f"sign_l1_action v2 failed: {e}")
+
+            # Try (addr, priv, action, 'perp', nonce, expires)
+            try:
+                return sign_l1_action(addr, priv, action, "perp", nonce, expires_after_ms)
+            except TypeError:
+                pass
+            except Exception as e:
+                logger.warning(f"sign_l1_action v3 failed: {e}")
+
+            # Try (addr, priv, action, 'perp', nonce, expires, is_mainnet)
+            try:
+                return sign_l1_action(addr, priv, action, "perp", nonce, expires_after_ms, is_mainnet)
+            except Exception as e:
+                logger.warning(f"sign_l1_action v4 failed: {e}")
+
+        raise RuntimeError("No compatible signer signature found")
+
     def market_order(self, coin: str, is_buy: bool, sz: float):
         coin = self._normalize_symbol(coin)
 
-        if not (Wallet or sign_l1_action):
-            return {"status": "error", "message": "No signing available"}
-
+        # Build market-equivalent action (IOC)
         action = {
             "type": "order",
             "orders": [{
@@ -108,42 +157,22 @@ class HyperliquidTrader:
             "grouping": "na"
         }
         nonce = int(time.time() * 1000)
-        expires_after_ms = 45_000
-        is_mainnet = not self.use_testnet
 
         try:
-            if Wallet:
-                w = Wallet(self.account_address, self.secret_key)
-                sig = w.sign_l1_action(action, nonce, expires_after_ms, is_mainnet)
-            else:
-                # FIX → build proper wallet dict for SDK 0.20.0
-                account = {"address": self.account_address}
-                sig = sign_l1_action(
-                    account,
-                    self.secret_key,
-                    action,
-                    nonce,
-                    expires_after_ms,
-                    is_mainnet
-                )
-
+            sig = self._sign_action(action, nonce)
             body = {"action": action, "nonce": nonce, "signature": sig}
             logger.info(f"Submitting market order (HTTP-signed): {coin} {'BUY' if is_buy else 'SELL'} {sz}")
-            r = requests.post(self.exchange_url, json=body, timeout=10)
+            r = requests.post(self.exchange_url, json=body, timeout=12)
+
+            # Try JSON; otherwise return text error
             try:
                 return r.json()
             except Exception:
                 return {"status": "error", "message": f"{r.status_code} {r.text}"}
-        except Exception as e:
-            logger.exception("HTTP-signed order failed")
-            return {"status": "error", "message": str(e)}
 
-    def _asset_index(self, coin: str) -> int:
-        meta = self.info.meta()
-        for i, a in enumerate(meta.get("universe", [])):
-            if a.get("name", "").upper() == coin.upper():
-                return i
-        raise ValueError(f"Asset not found: {coin}")
+        except Exception as e:
+            logger.exception("Signing or HTTP submit failed")
+            return {"status": "error", "message": str(e)}
 
 
 trader = HyperliquidTrader()
@@ -154,6 +183,7 @@ def tradingview_webhook():
     try:
         data = request.get_json(silent=True) or json.loads(request.data.decode("utf-8"))
         logger.info(f"Received TradingView alert: {data}")
+
         symbol = str(data.get("symbol", "BTC"))
         action = str(data.get("action", "buy")).lower()
         qty = float(data.get("quantity", 0.001))
@@ -167,10 +197,16 @@ def tradingview_webhook():
             }), 200
 
         result = trader.market_order(symbol, is_buy, qty)
+
         if isinstance(result, dict) and result.get("status") == "ok":
-            return jsonify({"status": "success", "message": f"Trade executed: {symbol} {'BUY' if is_buy else 'SELL'} {qty}", "result": result}), 200
+            return jsonify({
+                "status": "success",
+                "message": f"Trade executed: {symbol} {'BUY' if is_buy else 'SELL'} {qty}",
+                "result": result
+            }), 200
 
         return jsonify({"status": "error", "message": "Trade failed", "result": result}), 400
+
     except Exception as e:
         logger.exception("Webhook error")
         return jsonify({"status": "error", "message": str(e)}), 400
