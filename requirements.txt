@@ -2,3 +2,4 @@ flask==2.3.3
 python-dotenv==1.0.0
 gunicorn==21.2.0
 ccxt==4.5.10
+eth-account==0.11.2
