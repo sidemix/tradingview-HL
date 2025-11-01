@@ -192,17 +192,14 @@ def root():
 
 @app.get("/whoami")
 def whoami():
-    # ccxt.hyperliquid uses apiKey=API_WALLET, secret=PRIVATE_KEY
-    try:
-        owner_wallet = API_WALLET  # for HL this is the API Wallet addr used to sign
-    except Exception:
-        owner_wallet = None
     return jsonify({
-        "apiWallet_env": API_WALLET,
-        "apiWallet_from_privateKey": API_WALLET,
         "network": NETWORK,
-        "ownerWallet": owner_wallet
+        "apiWallet_env": API_WALLET,
+        "ownerWallet": API_WALLET,          # for HL, this is the signing wallet (API wallet)
+        "privateKey_present": bool(PRIVATE_KEY),
+        "ccxt_required": getattr(ex(), "requiredCredentials", None),
     })
+
 
 
 @app.get("/markets")
