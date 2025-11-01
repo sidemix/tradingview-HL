@@ -1,25 +1,23 @@
 import os, json, logging
 from decimal import Decimal, InvalidOperation
-
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-
 import ccxt
 from eth_account import Account
 
-# ---------- boot ----------
+# --------------------------------- setup ---------------------------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 log = logging.getLogger("webhook")
 
-# ---------- env ----------
 USE_TESTNET = os.getenv("USE_TESTNET", "true").strip().lower() == "true"
-OWNER_ADDR   = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS", "").strip()
-API_ADDR_ENV = os.getenv("HYPERLIQUID_API_WALLET_ADDRESS", "").strip()
-PRIV         = os.getenv("HYPERLIQUID_SECRET_KEY", "").strip()
+
+OWNER_ADDR   = (os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS") or "").strip()
+API_ADDR_ENV = (os.getenv("HYPERLIQUID_API_WALLET_ADDRESS") or "").strip()
+PRIV         = (os.getenv("HYPERLIQUID_SECRET_KEY") or "").strip()
 
 DEFAULT_NOTIONAL_USD = float(os.getenv("DEFAULT_NOTIONAL_USD", "50"))
-DEFAULT_SLIPPAGE     = float(os.getenv("DEFAULT_SLIPPAGE", "0.02"))  # 2%
+DEFAULT_SLIPPAGE     = float(os.getenv("DEFAULT_SLIPPAGE", "0.02"))
 ALLOWED_SYMBOLS = [s.strip().upper() for s in os.getenv(
     "ALLOWED_SYMBOLS", "BTC,ETH,SOL,LINK,BNB,AVAX"
 ).split(",") if s.strip()]
@@ -45,37 +43,37 @@ def build_urls():
 def derive_addr_from_priv(priv_hex: str) -> str:
     return Account.from_key(_normalize_hex(priv_hex)).address
 
-# sanity
-if not OWNER_ADDR:   raise RuntimeError("HYPERLIQUID_ACCOUNT_ADDRESS is not set")
-if not API_ADDR_ENV: raise RuntimeError("HYPERLIQUID_API_WALLET_ADDRESS is not set")
-if not PRIV:         raise RuntimeError("HYPERLIQUID_SECRET_KEY is not set")
+# sanity checks
+if not OWNER_ADDR:   raise RuntimeError("HYPERLIQUID_ACCOUNT_ADDRESS not set")
+if not API_ADDR_ENV: raise RuntimeError("HYPERLIQUID_API_WALLET_ADDRESS not set")
+if not PRIV:         raise RuntimeError("HYPERLIQUID_SECRET_KEY not set")
 
 DERIVED_ADDR = derive_addr_from_priv(PRIV)
 
-log.info(f"HL base_url: https://api.{'hyperliquid-testnet.xyz' if USE_TESTNET else 'hyperliquid.xyz'}")
-log.info(f"OWNER (balance wallet): {OWNER_ADDR}")
-log.info(f"API_ADDR_ENV:           {API_ADDR_ENV}")
-log.info(f"API_ADDR_DERIVED:       {DERIVED_ADDR}")
-log.info(f"Network:                {'testnet' if USE_TESTNET else 'mainnet'}")
+log.info("Network: %s", "testnet" if USE_TESTNET else "mainnet")
+log.info("Owner (account)     : %s", OWNER_ADDR)
+log.info("API wallet (env)    : %s", API_ADDR_ENV)
+log.info("API wallet (derived): %s", DERIVED_ADDR)
 
 if DERIVED_ADDR.lower() != API_ADDR_ENV.lower():
     raise RuntimeError(
         "API wallet mismatch:\n"
-        f"  Derived from PRIVATE KEY: {DERIVED_ADDR}\n"
-        f"  Env API wallet address :  {API_ADDR_ENV}\n"
+        f"  derived from PRIVATE KEY: {DERIVED_ADDR}\n"
+        f"  env API wallet address  : {API_ADDR_ENV}\n"
         "Fix your key/address pair so they match the authorized API wallet."
     )
 
-# ---------- CCXT exchange ----------
+# --------------------------------- ccxt ----------------------------------
 def make_exchange():
+    # IMPORTANT: walletAddress must be the API (signing) wallet.
     ex = ccxt.hyperliquid({
-        "walletAddress": OWNER_ADDR,                # owner wallet (holds balance)
-        "privateKey": _normalize_hex(PRIV),         # API wallet private key (agent wallet)
+        "walletAddress": API_ADDR_ENV,                 # signer (API wallet)
+        "privateKey": _normalize_hex(PRIV),            # signer private key
         "options": {
             "defaultType": "swap",
             "defaultSlippage": DEFAULT_SLIPPAGE,
-            "apiWalletAddress": API_ADDR_ENV,       # be explicit
-            "vaultAddress": API_ADDR_ENV,
+            "apiWalletAddress": API_ADDR_ENV,          # be explicit
+            "accountAddress": OWNER_ADDR,              # your owner account
         },
         "urls": build_urls(),
     })
@@ -85,54 +83,60 @@ def make_exchange():
 
 ex = make_exchange()
 
-# ---------- market helpers ----------
+# --------------------------------- markets --------------------------------
 def resolve_market_symbol(base: str) -> str:
-    """
-    Try common HL/CCXT shapes, then fall back to the first linear swap for the base.
-    """
     b = base.upper().strip()
+    # try common shapes first
     candidates = [
-        f"{b}/USD", f"{b}/USDC",
-        f"{b}/USD:USD", f"{b}/USDC:USDC",
+        f"{b}/USD", f"{b}/USDC", f"{b}/USD:USD", f"{b}/USDC:USDC",
         f"{b}-PERP", f"{b}USD", f"{b}USDC",
     ]
-    for sym in candidates:
-        if sym in ex.markets:
-            return sym
-    for m in ex.markets.values():       # any swap with matching base
+    for s in candidates:
+        if s in ex.markets:
+            return s
+    # look for any swap with matching base
+    for m in ex.markets.values():
         if (m.get("base") or "").upper() == b and m.get("swap"):
             return m["symbol"]
-    for m in ex.markets.values():       # last resort: contains base
-        if b in (m.get("symbol") or "").upper():
+    # final fallback: contains base
+    for m in ex.markets.values():
+        sym = (m.get("symbol") or "").upper()
+        if b in sym:
             return m["symbol"]
     raise RuntimeError(f"No Hyperliquid market found for base={b}")
 
 def fetch_last(symbol: str) -> float:
     t = ex.fetch_ticker(symbol)
-    px = _safe_float(t.get("last"))
-    if not px or px <= 0:
-        raise RuntimeError(f"Could not fetch last price for {symbol}")
-    return px
+    last = _safe_float(t.get("last"))
+    if last and last > 0:
+        return last
+    # Fallbacks for HL/CCXT when last is missing on testnet
+    info = t.get("info") or {}
+    fallbacks = [
+        t.get("mark"), t.get("ask"), t.get("bid"),
+        info.get("markPx"), info.get("oraclePx"),
+        info.get("mid"), info.get("p"), info.get("last"),
+    ]
+    for v in fallbacks:
+        vv = _safe_float(v)
+        if vv and vv > 0:
+            return vv
+    raise RuntimeError(f"Could not fetch last price for {symbol}")
 
 def compute_amount_from_notional(symbol: str, notional_usd: float) -> float:
-    last = fetch_last(symbol)
-    return float(notional_usd) / float(last)
+    px = fetch_last(symbol)
+    return float(notional_usd) / float(px)
 
 def place_order(symbol: str, side: str, amount: float, limit_price: float | None, params: dict):
-    """
-    For MARKET orders, CCXT/HL still requires a 'price' to compute max slippage.
-    We pass the current last price and also include 'slippage' in params.
-    """
     side = side.lower()
     if limit_price is not None:
         return ex.create_order(symbol, "limit", side, float(amount), float(limit_price), params)
-
-    # market: provide reference price explicitly
+    # MARKET: supply a reference price so CCXT can compute slippage cap
     ref_price = fetch_last(symbol)
     p = {**params, "slippage": DEFAULT_SLIPPAGE}
     return ex.create_order(symbol, "market", side, float(amount), ref_price, p)
 
-# ---------- Flask ----------
+# --------------------------------- flask ----------------------------------
 app = Flask(__name__)
 
 @app.get("/")
@@ -149,7 +153,6 @@ def health():
     bal = None
     try:
         b = ex.fetch_balance()
-        # try a couple of spots CCXT may expose
         bal = b.get("total", {}).get("USD") or b.get("info", {}).get("withdrawable")
     except Exception:
         pass
@@ -186,9 +189,9 @@ def tradingview():
     quantity  = _safe_float(data.get("quantity"))
     notional  = _safe_float(data.get("notional"))
     tif       = (data.get("tif") or "GTC").upper().strip()
-    post_only = bool(data.get("post_only", False))
+    post_only   = bool(data.get("post_only", False))
     reduce_only = bool(data.get("reduce_only", False))
-    limit_px  = _safe_float(data.get("price"))
+    limit_px    = _safe_float(data.get("price"))
 
     if not symbol_in:
         return jsonify({"status": "error", "message": "symbol is required"}), 400
