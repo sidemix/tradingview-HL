@@ -29,13 +29,18 @@ ALLOWED_SYMBOLS = set(
 # ── Exchange init (CCXT) ──────────────────────────────────────────────────────
 def make_exchange():
     hostname = "hyperliquid-testnet.xyz" if USE_TESTNET else "hyperliquid.xyz"
+    api_wallet = os.getenv("HYPERLIQUID_API_WALLET_ADDRESS", "").strip()
+
     ex = ccxt.hyperliquid({
-        # HL via CCXT expects these names:
-        "walletAddress": HL_ADDRESS,     # your public address (0x…)
-        "privateKey": HL_PRIVKEY,        # your API wallet private key (0x…)
+        # HL via CCXT:
+        "walletAddress": HL_ADDRESS,     # owner/user wallet (the one with the balance)
+        "privateKey": HL_PRIVKEY,        # API wallet PRIVATE KEY
         "options": {
             "defaultType": "swap",
-            "defaultSlippage": DEFAULT_SLIPPAGE,  # used if you omit `slippage` in params
+            "defaultSlippage": DEFAULT_SLIPPAGE,
+            # provide API wallet address explicitly (names used by CCXT/HL adapter)
+            "apiWalletAddress": api_wallet,
+            "vaultAddress": api_wallet,  # some versions use 'vaultAddress' internally
         },
         "urls": {
             "api": {
@@ -46,6 +51,7 @@ def make_exchange():
     })
     ex.load_markets()
     return ex
+
 
 try:
     ex = make_exchange()
