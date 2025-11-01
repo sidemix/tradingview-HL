@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-# module signer
+# Try to import signer
 try:
     from hyperliquid.utils.signing import sign_l1_action
 except Exception:
@@ -19,25 +19,28 @@ logger = logging.getLogger("webhook_server")
 class HyperliquidTrader:
     def __init__(self):
         self.use_testnet = os.getenv("USE_TESTNET", "true").lower() == "true"
-        self.account_address = (os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS") or "").strip()
-        self.priv_key = (os.getenv("HYPERLIQUID_SECRET_KEY") or "").strip()
+        self.address = (os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS") or "").strip()
+        self.priv = (os.getenv("HYPERLIQUID_SECRET_KEY") or "").strip()
 
-        # Keep priv as-is (most wheels accept 0x-prefixed hex)
         self.base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
         self.exchange_url = f"{self.base_url}/exchange"
         self.info = Info(self.base_url, skip_ws=True)
 
         logger.info(f"HL base_url: {self.base_url}")
-        logger.info(f"HL address:  {self.account_address}")
+        logger.info(f"HL address:  {self.address}")
         logger.info(f"Network:     {'testnet' if self.use_testnet else 'mainnet'}")
 
-        if not (self.account_address and self.priv_key and sign_l1_action):
+        if not (self.address and self.priv and sign_l1_action):
             logger.warning("⚠️ Missing address/secret or signer — DEMO mode")
             self.initialized = False
+            self.sign_variant = None
             return
 
+        # Probe signer at boot with a harmless dummy action
+        self.sign_variant = self._detect_signer_variant()
+
         try:
-            st = self.info.user_state(self.account_address.lower())
+            st = self.info.user_state(self.address.lower())
             bal = float(st.get("withdrawable", 0)) if st else 0.0
             logger.info(f"✅ Connected to HL (HTTP-signed). Balance: {bal}")
         except Exception as e:
@@ -55,41 +58,105 @@ class HyperliquidTrader:
                 return i
         raise ValueError(f"Asset not found: {coin}")
 
-    def _sign(self, action: dict, nonce: int):
+    def _detect_signer_variant(self):
         """
-        Your wheel’s logs showed:
-          - missing 'is_mainnet' -> wants the 6-pos form
-          - active_pool variants caused 'to_bytes' / 'startswith' errors
-        So we try, in order:
-          (addr, priv, action, nonce, expires, is_mainnet)   # ✅ primary
-          (addr, priv, action, nonce, expires)               # fallback (older)
-          (addr, priv, action, 1, nonce, expires)            # rare pool=int
+        Try a comprehensive matrix of positional signatures and cache the one that works.
+        We sign a no-op-ish dummy action locally (no HTTP call), so it's safe.
         """
-        expires_after_ms = 45_000
-        is_mainnet = not self.use_testnet
-        addr = self.account_address
-        priv = self.priv_key
+        if not sign_l1_action:
+            return None
 
-        last_err = None
-        variants = [
-            (addr, priv, action, nonce, expires_after_ms, is_mainnet),
-            (addr, priv, action, nonce, expires_after_ms),
-            (addr, priv, action, 1, nonce, expires_after_ms),
+        is_mainnet = not self.use_testnet
+        nonce = int(time.time() * 1000)
+        expires = 45000
+
+        # dummy minimal action (structure only; not submitted)
+        dummy_action = {"type": "heartbeat"}  # simplest possible thing to hash
+
+        addr = self.address
+        acct = {"address": self.address}      # some wheels expect this first
+
+        # Build a matrix of positional tuples to try (in order)
+        candidates = [
+            # Common 6-pos: addr, priv, action, nonce, expires, is_mainnet
+            (addr, self.priv, dummy_action, nonce, expires, is_mainnet),
+            # Same, with account dict first (some wheels expect account first)
+            (acct, self.priv, dummy_action, nonce, expires, is_mainnet),
+
+            # With active_pool inserted as 4th arg (perp=1)
+            (addr, self.priv, dummy_action, 1, nonce, expires, is_mainnet),
+            (acct, self.priv, dummy_action, 1, nonce, expires, is_mainnet),
+
+            # With active_pool omitted, no is_mainnet (older wheels)
+            (addr, self.priv, dummy_action, nonce, expires),
+            (acct, self.priv, dummy_action, nonce, expires),
+
+            # With active_pool=0 (spot), still include is_mainnet
+            (addr, self.priv, dummy_action, 0, nonce, expires, is_mainnet),
+            (acct, self.priv, dummy_action, 0, nonce, expires, is_mainnet),
+
+            # With active_pool as bytes b"perp"
+            (addr, self.priv, dummy_action, b"perp", nonce, expires, is_mainnet),
+            (acct, self.priv, dummy_action, b"perp", nonce, expires, is_mainnet),
         ]
 
-        for i, args in enumerate(variants, 1):
+        last_err = None
+        for i, args in enumerate(candidates, 1):
             try:
-                sig = sign_l1_action(*args)
-                logger.info(f"✅ sign_l1_action positional v#{i} OK (argc={len(args)})")
-                return sig
+                sign_l1_action(*args)  # we only test signing; no submission
+                logger.info(f"✅ Detected signer positional variant #{i} (argc={len(args)})")
+                return args  # return the ARG SHAPE that worked
             except TypeError as te:
-                logger.warning(f"sign_l1_action positional v#{i} TypeError: {te}")
+                logger.warning(f"sign_l1_action probe v#{i} TypeError: {te}")
                 last_err = te
             except Exception as e:
-                logger.warning(f"sign_l1_action positional v#{i} failed: {e}")
+                logger.warning(f"sign_l1_action probe v#{i} failed: {e}")
                 last_err = e
 
-        raise RuntimeError(f"No compatible signer signature found ({last_err})")
+        logger.error(f"❌ No compatible signer signature found during probe ({last_err})")
+        return None
+
+    def _sign(self, action: dict, nonce: int):
+        if not self.sign_variant:
+            # last-ditch: re-probe (in case wheel changed between builds)
+            self.sign_variant = self._detect_signer_variant()
+            if not self.sign_variant:
+                raise RuntimeError("No compatible signer signature found")
+
+        # The detected variant is just the tuple SHAPE we should use.
+        # Replace the dummy_action, nonce, expires, etc. with live values.
+        is_mainnet = not self.use_testnet
+        expires = 45000
+        addr = self.address
+        acct = {"address": self.address}
+
+        variant = self.sign_variant
+        argc = len(variant)
+
+        # Map shape dynamically
+        if argc == 6:
+            # Could be (addr/acct, priv, action, nonce, expires, is_mainnet)
+            base0, base1, *_ = variant[:2]
+            first = addr if isinstance(base0, str) else acct
+            args = (first, self.priv, action, nonce, expires, is_mainnet)
+        elif argc == 7:
+            # Could be (addr/acct, priv, action, active_pool, nonce, expires, is_mainnet)
+            base0, base1, *_ = variant[:2]
+            first = addr if isinstance(base0, str) else acct
+            active_pool = variant[3]
+            args = (first, self.priv, action, active_pool, nonce, expires, is_mainnet)
+        elif argc == 5:
+            # (addr/acct, priv, action, nonce, expires)
+            base0, base1, *_ = variant[:2]
+            first = addr if isinstance(base0, str) else acct
+            args = (first, self.priv, action, nonce, expires)
+        else:
+            # Try to be safe: rebuild based on types we saw in probe
+            base0 = variant[0]
+            first = addr if isinstance(base0, str) else acct
+            args = (first, self.priv, action, nonce, expires, is_mainnet)
+
+        return sign_l1_action(*args)
 
     def market_order(self, coin: str, is_buy: bool, sz: float):
         coin = self._normalize_symbol(coin)
@@ -122,7 +189,7 @@ class HyperliquidTrader:
 
     def get_balance(self) -> float:
         try:
-            st = self.info.user_state(self.account_address.lower())
+            st = self.info.user_state(self.address.lower())
             return float(st.get("withdrawable", 0)) if st else 0.0
         except Exception:
             return 0.0
@@ -171,7 +238,7 @@ def health_check():
         "status": "healthy",
         "trading": "active" if trader.initialized else "demo",
         "balance": trader.get_balance(),
-        "credentials_set": bool(trader.account_address and trader.priv_key),
+        "credentials_set": bool(trader.address and trader.priv),
         "network": "testnet" if trader.use_testnet else "mainnet"
     }), 200
 
@@ -187,5 +254,3 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
-
