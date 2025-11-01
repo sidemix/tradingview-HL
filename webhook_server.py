@@ -1,6 +1,4 @@
-import os
-import json
-import logging
+import os, json, logging
 from decimal import Decimal, InvalidOperation
 
 from flask import Flask, request, jsonify
@@ -9,24 +7,19 @@ from dotenv import load_dotenv
 import ccxt
 from eth_account import Account
 
-# ----------------------------
-# Boot + logging
-# ----------------------------
+# ---------- boot ----------
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 log = logging.getLogger("webhook")
 
-# ----------------------------
-# ENV & constants
-# ----------------------------
+# ---------- env ----------
 USE_TESTNET = os.getenv("USE_TESTNET", "true").strip().lower() == "true"
-
-OWNER_ADDR = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS", "").strip()
+OWNER_ADDR   = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS", "").strip()
 API_ADDR_ENV = os.getenv("HYPERLIQUID_API_WALLET_ADDRESS", "").strip()
-PRIV = os.getenv("HYPERLIQUID_SECRET_KEY", "").strip()
+PRIV         = os.getenv("HYPERLIQUID_SECRET_KEY", "").strip()
 
 DEFAULT_NOTIONAL_USD = float(os.getenv("DEFAULT_NOTIONAL_USD", "50"))
-DEFAULT_SLIPPAGE = float(os.getenv("DEFAULT_SLIPPAGE", "0.02"))  # 2%
+DEFAULT_SLIPPAGE     = float(os.getenv("DEFAULT_SLIPPAGE", "0.02"))  # 2%
 ALLOWED_SYMBOLS = [s.strip().upper() for s in os.getenv(
     "ALLOWED_SYMBOLS", "BTC,ETH,SOL,LINK,BNB,AVAX"
 ).split(",") if s.strip()]
@@ -37,12 +30,9 @@ def _normalize_hex(x: str) -> str:
 
 def _safe_float(x, default=None):
     try:
-        if isinstance(x, (int, float)):
-            return float(x)
-        if isinstance(x, Decimal):
-            return float(x)
-        if isinstance(x, str):
-            return float(x.strip())
+        if isinstance(x, (int, float)): return float(x)
+        if isinstance(x, Decimal):      return float(x)
+        if isinstance(x, str):          return float(x.strip())
         return default
     except (ValueError, InvalidOperation, TypeError):
         return default
@@ -55,13 +45,10 @@ def build_urls():
 def derive_addr_from_priv(priv_hex: str) -> str:
     return Account.from_key(_normalize_hex(priv_hex)).address
 
-# ---- required env checks ----
-if not OWNER_ADDR:
-    raise RuntimeError("HYPERLIQUID_ACCOUNT_ADDRESS is not set")
-if not API_ADDR_ENV:
-    raise RuntimeError("HYPERLIQUID_API_WALLET_ADDRESS is not set")
-if not PRIV:
-    raise RuntimeError("HYPERLIQUID_SECRET_KEY is not set")
+# sanity
+if not OWNER_ADDR:   raise RuntimeError("HYPERLIQUID_ACCOUNT_ADDRESS is not set")
+if not API_ADDR_ENV: raise RuntimeError("HYPERLIQUID_API_WALLET_ADDRESS is not set")
+if not PRIV:         raise RuntimeError("HYPERLIQUID_SECRET_KEY is not set")
 
 DERIVED_ADDR = derive_addr_from_priv(PRIV)
 
@@ -79,14 +66,15 @@ if DERIVED_ADDR.lower() != API_ADDR_ENV.lower():
         "Fix your key/address pair so they match the authorized API wallet."
     )
 
+# ---------- CCXT exchange ----------
 def make_exchange():
     ex = ccxt.hyperliquid({
-        "walletAddress": OWNER_ADDR,                # owner wallet (balance)
-        "privateKey": _normalize_hex(PRIV),         # API wallet private key
+        "walletAddress": OWNER_ADDR,                # owner wallet (holds balance)
+        "privateKey": _normalize_hex(PRIV),         # API wallet private key (agent wallet)
         "options": {
             "defaultType": "swap",
             "defaultSlippage": DEFAULT_SLIPPAGE,
-            "apiWalletAddress": API_ADDR_ENV,
+            "apiWalletAddress": API_ADDR_ENV,       # be explicit
             "vaultAddress": API_ADDR_ENV,
         },
         "urls": build_urls(),
@@ -97,49 +85,54 @@ def make_exchange():
 
 ex = make_exchange()
 
-# ----------------------------
-# Market resolution
-# ----------------------------
+# ---------- market helpers ----------
 def resolve_market_symbol(base: str) -> str:
     """
-    Try several CCXT symbols for Hyperliquid, then fall back to the first
-    linear swap for that base.
+    Try common HL/CCXT shapes, then fall back to the first linear swap for the base.
     """
     b = base.upper().strip()
     candidates = [
-        f"{b}/USD", f"{b}/USDC", f"{b}/USD:USD", f"{b}/USDC:USDC",
+        f"{b}/USD", f"{b}/USDC",
+        f"{b}/USD:USD", f"{b}/USDC:USDC",
         f"{b}-PERP", f"{b}USD", f"{b}USDC",
     ]
-    # Direct hits
     for sym in candidates:
         if sym in ex.markets:
             return sym
-    # Fallback: find a swap market with matching base
-    for m in ex.markets.values():
+    for m in ex.markets.values():       # any swap with matching base
         if (m.get("base") or "").upper() == b and m.get("swap"):
             return m["symbol"]
-    # Last chance: any market that contains base
-    for m in ex.markets.values():
+    for m in ex.markets.values():       # last resort: contains base
         if b in (m.get("symbol") or "").upper():
             return m["symbol"]
     raise RuntimeError(f"No Hyperliquid market found for base={b}")
 
-def compute_amount_from_notional(symbol: str, notional_usd: float) -> float:
-    ticker = ex.fetch_ticker(symbol)
-    last = _safe_float(ticker.get("last"))
-    if not last or last <= 0:
+def fetch_last(symbol: str) -> float:
+    t = ex.fetch_ticker(symbol)
+    px = _safe_float(t.get("last"))
+    if not px or px <= 0:
         raise RuntimeError(f"Could not fetch last price for {symbol}")
+    return px
+
+def compute_amount_from_notional(symbol: str, notional_usd: float) -> float:
+    last = fetch_last(symbol)
     return float(notional_usd) / float(last)
 
-def place_order(symbol: str, side: str, amount: float, price: float | None, params: dict):
+def place_order(symbol: str, side: str, amount: float, limit_price: float | None, params: dict):
+    """
+    For MARKET orders, CCXT/HL still requires a 'price' to compute max slippage.
+    We pass the current last price and also include 'slippage' in params.
+    """
     side = side.lower()
-    if price is not None:
-        return ex.create_order(symbol, "limit", side, float(amount), float(price), params)
-    return ex.create_order(symbol, "market", side, float(amount), None, {**params, "slippage": DEFAULT_SLIPPAGE})
+    if limit_price is not None:
+        return ex.create_order(symbol, "limit", side, float(amount), float(limit_price), params)
 
-# ----------------------------
-# Flask app
-# ----------------------------
+    # market: provide reference price explicitly
+    ref_price = fetch_last(symbol)
+    p = {**params, "slippage": DEFAULT_SLIPPAGE}
+    return ex.create_order(symbol, "market", side, float(amount), ref_price, p)
+
+# ---------- Flask ----------
 app = Flask(__name__)
 
 @app.get("/")
@@ -156,6 +149,7 @@ def health():
     bal = None
     try:
         b = ex.fetch_balance()
+        # try a couple of spots CCXT may expose
         bal = b.get("total", {}).get("USD") or b.get("info", {}).get("withdrawable")
     except Exception:
         pass
@@ -188,18 +182,18 @@ def tradingview():
     log.info("Received alert: %s", data)
 
     symbol_in = (data.get("symbol") or "").upper().strip()
-    action = (data.get("action") or "").lower().strip()
-    quantity = _safe_float(data.get("quantity"))
-    notional = _safe_float(data.get("notional"))
-    tif = (data.get("tif") or "GTC").upper().strip()
+    action    = (data.get("action") or "").lower().strip()
+    quantity  = _safe_float(data.get("quantity"))
+    notional  = _safe_float(data.get("notional"))
+    tif       = (data.get("tif") or "GTC").upper().strip()
     post_only = bool(data.get("post_only", False))
     reduce_only = bool(data.get("reduce_only", False))
-    limit_px = _safe_float(data.get("price"))
+    limit_px  = _safe_float(data.get("price"))
 
     if not symbol_in:
         return jsonify({"status": "error", "message": "symbol is required"}), 400
 
-    base = symbol_in.replace("/USD", "").replace("USDT", "").strip()
+    base = symbol_in.replace("/USD", "").replace("/USDC", "").replace("USDT", "").strip()
     if ALLOWED_SYMBOLS and base not in ALLOWED_SYMBOLS:
         return jsonify({"status": "error", "message": f"symbol {base} not allowed"}), 400
 
@@ -233,7 +227,7 @@ def tradingview():
         return jsonify({
             "status": "success",
             "message": f"{side.upper()} {amount:g} {hl_symbol} "
-                       f"{'@ '+str(limit_px) if limit_px else '(market)'}",
+                       f"{'@ '+str(limit_px) if limit_px else '(market with ref price)'}",
             "order": order
         })
     except Exception as e:
