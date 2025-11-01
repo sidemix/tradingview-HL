@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-# Try to import signer (module name is stable across recent wheels)
+# signer (module-level)
 try:
     from hyperliquid.utils.signing import sign_l1_action
 except Exception:
@@ -21,12 +21,6 @@ class HyperliquidTrader:
         self.use_testnet = os.getenv("USE_TESTNET", "true").lower() == "true"
         self.account_address = (os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS") or "").strip()
         self.secret_key = (os.getenv("HYPERLIQUID_SECRET_KEY") or "").strip()
-
-        # Normalize privkey to hex without whitespace; many wheels accept with or without 0x
-        if self.secret_key.startswith("0x") and len(self.secret_key) == 66:
-            self.priv_hex = self.secret_key[2:]
-        else:
-            self.priv_hex = self.secret_key
 
         self.base_url = constants.TESTNET_API_URL if self.use_testnet else constants.MAINNET_API_URL
         self.exchange_url = f"{self.base_url}/exchange"
@@ -61,58 +55,33 @@ class HyperliquidTrader:
                 return i
         raise ValueError(f"Asset not found: {coin}")
 
-    def _try_sign(self, action: dict, nonce: int):
+    def _sign_positional(self, addr: str, priv: str, action: dict, nonce: int, expires_after_ms: int):
         """
-        Try common keyword signatures across SDK variants:
-          (address, priv_key, action, active_pool, nonce, expires_after, is_mainnet?)
-          (address, priv_key, action, nonce, expires_after, is_mainnet?)
-          (account, priv_key, action, nonce, expires_after, is_mainnet?)  # account is dict {'address':...}
-        We always pass ints for nonce/expires; active_pool='perp' when used.
+        Try common positional signatures seen in HL SDKs:
+          1) (address, priv, action, 1, nonce, expires_after)   # active_pool=1 (perp)
+          2) (address, priv, action, 0, nonce, expires_after)   # active_pool=0 (spot)
+          3) (address, priv, action, nonce, expires_after)      # older builds (no pool)
+          4) (address, priv, action, b'perp', nonce, expires)   # some builds expect bytes
         """
-        if not sign_l1_action:
-            raise RuntimeError("sign_l1_action not available")
-
-        expires_after_ms = 45_000
-        is_mainnet = not self.use_testnet
-        addr = self.account_address
-        priv = self.secret_key  # keep as 0x… if that’s what your wheel expects
+        last_err = None
 
         variants = [
-            # Most common modern wheels (with active_pool and is_mainnet)
-            {"address": addr, "priv_key": priv, "action": action, "active_pool": "perp",
-             "nonce": nonce, "expires_after": expires_after_ms, "is_mainnet": is_mainnet},
-            # Same without is_mainnet
-            {"address": addr, "priv_key": priv, "action": action, "active_pool": "perp",
-             "nonce": nonce, "expires_after": expires_after_ms},
-            # Without active_pool, with is_mainnet
-            {"address": addr, "priv_key": priv, "action": action,
-             "nonce": nonce, "expires_after": expires_after_ms, "is_mainnet": is_mainnet},
-            # Without active_pool and is_mainnet
-            {"address": addr, "priv_key": priv, "action": action,
-             "nonce": nonce, "expires_after": expires_after_ms},
-
-            # Some builds take 'account' instead of 'address'
-            {"account": {"address": addr}, "priv_key": priv, "action": action, "active_pool": "perp",
-             "nonce": nonce, "expires_after": expires_after_ms, "is_mainnet": is_mainnet},
-            {"account": {"address": addr}, "priv_key": priv, "action": action, "active_pool": "perp",
-             "nonce": nonce, "expires_after": expires_after_ms},
-            {"account": {"address": addr}, "priv_key": priv, "action": action,
-             "nonce": nonce, "expires_after": expires_after_ms, "is_mainnet": is_mainnet},
-            {"account": {"address": addr}, "priv_key": priv, "action": action,
-             "nonce": nonce, "expires_after": expires_after_ms},
+            (addr, priv, action, 1, nonce, expires_after_ms),         # perp as int(1)
+            (addr, priv, action, 0, nonce, expires_after_ms),         # spot as int(0)
+            (addr, priv, action, nonce, expires_after_ms),            # no pool
+            (addr, priv, action, b"perp", nonce, expires_after_ms),   # pool as bytes
         ]
 
-        last_err = None
-        for i, kwargs in enumerate(variants, 1):
+        for i, args in enumerate(variants, 1):
             try:
-                sig = sign_l1_action(**kwargs)
-                logger.info(f"✅ sign_l1_action succeeded with variant #{i}: keys={list(kwargs.keys())}")
+                sig = sign_l1_action(*args)
+                logger.info(f"✅ sign_l1_action positional variant #{i} succeeded (argc={len(args)})")
                 return sig
             except TypeError as te:
-                logger.warning(f"sign_l1_action variant #{i} TypeError: {te}")
+                logger.warning(f"sign_l1_action positional variant #{i} TypeError: {te}")
                 last_err = te
             except Exception as e:
-                logger.warning(f"sign_l1_action variant #{i} failed: {e}")
+                logger.warning(f"sign_l1_action positional variant #{i} failed: {e}")
                 last_err = e
 
         raise RuntimeError(f"No compatible signer signature found ({last_err})")
@@ -133,9 +102,10 @@ class HyperliquidTrader:
             "grouping": "na"
         }
         nonce = int(time.time() * 1000)
+        expires_after_ms = 45_000
 
         try:
-            sig = self._try_sign(action, nonce)
+            sig = self._sign_positional(self.account_address, self.secret_key, action, nonce, expires_after_ms)
             body = {"action": action, "nonce": nonce, "signature": sig}
             logger.info(f"Submitting order: {coin} {'BUY' if is_buy else 'SELL'} {sz}")
             r = requests.post(self.exchange_url, json=body, timeout=12)
