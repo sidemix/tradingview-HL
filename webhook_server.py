@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import logging
 from decimal import Decimal
 
@@ -14,23 +13,30 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("webhook")
 
+# ── Env ───────────────────────────────────────────────────────────────────────
 USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 HL_ADDRESS = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS", "").strip()
-HL_PRIVKEY = os.getenv("HYPERLIQUID_SECRET_KEY", "").strip()
+HL_PRIVKEY = os.getenv("HYPERLIQUID_SECRET_KEY", "").strip()  # 0x… private key
 DEFAULT_NOTIONAL = Decimal(os.getenv("DEFAULT_NOTIONAL_USD", "50"))
+DEFAULT_SLIPPAGE = float(os.getenv("DEFAULT_SLIPPAGE", "0.02"))  # 2% default
 
-ALLOWED_SYMBOLS = set([s.strip().upper() for s in os.getenv(
-    "ALLOWED_SYMBOLS",
-    "BTC,ETH,SOL,LINK,BNB,AVAX"
-).split(",") if s.strip()])
+ALLOWED_SYMBOLS = set(
+    s.strip().upper() for s in os.getenv(
+        "ALLOWED_SYMBOLS", "BTC,ETH,SOL,LINK,BNB,AVAX"
+    ).split(",") if s.strip()
+)
 
+# ── Exchange init (CCXT) ──────────────────────────────────────────────────────
 def make_exchange():
     hostname = "hyperliquid-testnet.xyz" if USE_TESTNET else "hyperliquid.xyz"
     ex = ccxt.hyperliquid({
-        # HL via CCXT wants these names:
+        # HL via CCXT expects these names:
         "walletAddress": HL_ADDRESS,     # your public address (0x…)
         "privateKey": HL_PRIVKEY,        # your API wallet private key (0x…)
-        "options": {"defaultType": "swap"},
+        "options": {
+            "defaultType": "swap",
+            "defaultSlippage": DEFAULT_SLIPPAGE,  # used if you omit `slippage` in params
+        },
         "urls": {
             "api": {
                 "public": f"https://api.{hostname}",
@@ -41,7 +47,6 @@ def make_exchange():
     ex.load_markets()
     return ex
 
-
 try:
     ex = make_exchange()
     log.info(f"✅ Connected to Hyperliquid via CCXT ({'testnet' if USE_TESTNET else 'mainnet'})")
@@ -49,6 +54,7 @@ except Exception as e:
     log.exception("Failed to initialize exchange")
     ex = None
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def to_hl_symbol(sym: str) -> str:
     s = (sym or "BTC").upper()
     s = s.replace("USDT", "USDC").replace("USD", "USDC").replace("/USDC", "")
@@ -59,7 +65,7 @@ def to_hl_symbol(sym: str) -> str:
     raise ValueError(f"No HL swap market found for base '{base}'")
 
 def amount_to_precision(symbol: str, amount) -> str:
-    # Always delegate precision/rounding to CCXT
+    # Always let CCXT format amounts
     return ex.amount_to_precision(symbol, float(amount))
 
 def compute_market_size(symbol: str, notional: Decimal) -> str:
@@ -80,6 +86,7 @@ def parse_bool(v, default=False):
         return v
     return str(v).lower() in ("1", "true", "t", "yes", "y")
 
+# ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     mode = "active" if (ex and HL_ADDRESS and HL_PRIVKEY) else "demo"
@@ -135,8 +142,8 @@ def tradingview():
         return jsonify({"status": "error", "message": f"Symbol resolve failed: {e}"}), 400
 
     side = "buy" if action in ("buy", "long") else "sell"
-    is_market = True
 
+    # Determine amount
     try:
         if qty is not None:
             amount = amount_to_precision(hl_symbol, Decimal(str(qty)))
@@ -147,25 +154,34 @@ def tradingview():
         return jsonify({"status": "error", "message": f"Size calc failed: {e}"}), 400
 
     params = {"reduceOnly": reduce_only}
-    if post_only:
-        params["postOnly"] = True
-        is_market = False
     if tif in ("IOC", "FOK", "GTC"):
         params["timeInForce"] = tif
 
     try:
-        if is_market:
-            order = ex.create_order(hl_symbol, "market", side, float(amount), None, params)
-        else:
+        if post_only:
+            # Post-only must be limit
+            params["postOnly"] = True
             t = ex.fetch_ticker(hl_symbol)
             last = Decimal(str(t.get("last") or t.get("close")))
-            # Nudge price to stay on-book for postOnly
+            # Slight nudge to keep order on book
             limit_px = float(last * (Decimal("0.999") if side == "sell" else Decimal("1.001")))
             order = ex.create_order(hl_symbol, "limit", side, float(amount), limit_px, params)
+        else:
+            # MARKET: HL CCXT requires a reference price and (optionally) a slippage
+            t = ex.fetch_ticker(hl_symbol)
+            last = float(t.get("last") or t.get("close"))
+            order = ex.create_order(
+                hl_symbol,
+                "market",
+                side,
+                float(amount),
+                last,                                 # reference price required
+                {**params, "slippage": DEFAULT_SLIPPAGE}  # e.g., 0.02 = 2%
+            )
 
         return jsonify({
             "status": "success",
-            "message": f"Executed {side.upper()} {amount} {hl_symbol} ({'market' if is_market else 'limit'})",
+            "message": f"Executed {side.upper()} {amount} {hl_symbol} ({'limit postOnly' if post_only else 'market'})",
             "result": order
         })
     except ccxt.BaseError as e:
@@ -175,5 +191,6 @@ def tradingview():
         log.exception("Unhandled error")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ── Entrypoint ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
