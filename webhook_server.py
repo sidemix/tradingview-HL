@@ -28,20 +28,20 @@ def ex() -> ccxt.Exchange:
     if _ex is not None:
         return _ex
 
-    # ccxt hyperliquid requires 'apiKey' (owner wallet) and 'secret' (api wallet private key)
-    # We use the API Wallet address as apiKey for signing (per ccxt HL driver),
-    # and the PRIVATE_KEY as secret.
-    # testnet: enable sandboxMode
+    # ccxt.hyperliquid expects:
+    # - privateKey: API wallet’s private key (0x…)
+    # - apiKey (or walletAddress): API wallet address (0x…)
     opts = {
-        "apiKey": API_WALLET or None,
-        "secret": PRIVATE_KEY or None,
+        "apiKey": API_WALLET or None,         # API Wallet address
+        "privateKey": PRIVATE_KEY or None,    # API Wallet private key
+        "walletAddress": API_WALLET or None,  # some ccxt versions read this too
         "options": {
-            # slippage is still passed per-order, but set a sensible default here too
             "defaultSlippage": DEFAULT_SLIPPAGE,
         },
     }
+
     hl = ccxt.hyperliquid(opts)
-    # Sandbox for testnet
+
     if NETWORK == "testnet":
         try:
             hl.set_sandbox_mode(True)
@@ -49,7 +49,6 @@ def ex() -> ccxt.Exchange:
         except Exception as e:
             log.warning("Could not enable sandbox (testnet): %s", e)
 
-    # Preload markets for precision/limits
     try:
         hl.load_markets(True)
         log.info("✅ Markets loaded: %s symbols", len(hl.markets))
@@ -59,6 +58,7 @@ def ex() -> ccxt.Exchange:
 
     _ex = hl
     return _ex
+
 
 
 def symbol_to_hl(user_symbol: str) -> str:
