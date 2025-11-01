@@ -27,8 +27,9 @@ ALLOWED_SYMBOLS = set([s.strip().upper() for s in os.getenv(
 def make_exchange():
     hostname = "hyperliquid-testnet.xyz" if USE_TESTNET else "hyperliquid.xyz"
     ex = ccxt.hyperliquid({
-        "apiKey": HL_ADDRESS,
-        "secret": HL_PRIVKEY,
+        # HL via CCXT wants these names:
+        "walletAddress": HL_ADDRESS,     # your public address (0x…)
+        "privateKey": HL_PRIVKEY,        # your API wallet private key (0x…)
         "options": {"defaultType": "swap"},
         "urls": {
             "api": {
@@ -39,6 +40,7 @@ def make_exchange():
     })
     ex.load_markets()
     return ex
+
 
 try:
     ex = make_exchange()
