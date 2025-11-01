@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+from eth_account import Account
 from decimal import Decimal
 
 from flask import Flask, request, jsonify
@@ -27,20 +28,45 @@ ALLOWED_SYMBOLS = set(
 )
 
 # ── Exchange init (CCXT) ──────────────────────────────────────────────────────
+def _normalize_hex(x: str) -> str:
+    x = (x or "").strip()
+    return x if x.startswith("0x") else ("0x" + x)
+
 def make_exchange():
     hostname = "hyperliquid-testnet.xyz" if USE_TESTNET else "hyperliquid.xyz"
-    api_wallet = os.getenv("HYPERLIQUID_API_WALLET_ADDRESS", "").strip()
+
+    api_wallet_env = os.getenv("HYPERLIQUID_API_WALLET_ADDRESS", "").strip()
+    priv = _normalize_hex(HL_PRIVKEY)
+
+    # derive address from private key
+    try:
+        acct = Account.from_key(priv)
+        derived_addr = acct.address  # checksummed 0x…
+    except Exception as e:
+        raise RuntimeError(f"Private key invalid: {e}")
+
+    if not api_wallet_env:
+        raise RuntimeError("HYPERLIQUID_API_WALLET_ADDRESS is not set in env.")
+
+    # enforce exact match
+    if derived_addr.lower() != api_wallet_env.lower():
+        raise RuntimeError(
+            f"API wallet mismatch:\n"
+            f"  - Derived from PRIVATE KEY: {derived_addr}\n"
+            f"  - Env HYPERLIQUID_API_WALLET_ADDRESS: {api_wallet_env}\n"
+            f"Fix: Either paste the correct PRIVATE KEY for {api_wallet_env}, "
+            f"or set HYPERLIQUID_API_WALLET_ADDRESS to {derived_addr} (and make sure that API wallet exists on TESTNET)."
+        )
 
     ex = ccxt.hyperliquid({
         # HL via CCXT:
-        "walletAddress": HL_ADDRESS,     # owner/user wallet (the one with the balance)
-        "privateKey": HL_PRIVKEY,        # API wallet PRIVATE KEY
+        "walletAddress": HL_ADDRESS,          # OWNER wallet (with balance)
+        "privateKey": priv,                   # API wallet PRIVATE KEY
         "options": {
             "defaultType": "swap",
             "defaultSlippage": DEFAULT_SLIPPAGE,
-            # provide API wallet address explicitly (names used by CCXT/HL adapter)
-            "apiWalletAddress": api_wallet,
-            "vaultAddress": api_wallet,  # some versions use 'vaultAddress' internally
+            "apiWalletAddress": api_wallet_env,  # make it explicit
+            "vaultAddress": api_wallet_env,      # some HL builds use this internally
         },
         "urls": {
             "api": {
