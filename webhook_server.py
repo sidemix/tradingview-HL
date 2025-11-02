@@ -1,6 +1,8 @@
 # webhook_server.py
-import os, math, time, logging
-from typing import Optional, Tuple, Dict, Any
+import os
+import math
+import logging
+from typing import Tuple, Dict, Any
 
 from flask import Flask, request, jsonify
 import ccxt
@@ -8,31 +10,28 @@ import ccxt
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("webhook")
 
-# ----------------- ENV / CONFIG -----------------
-NETWORK             = os.getenv("HL_NETWORK", "testnet").lower()       # "testnet" | "mainnet"
-API_WALLET          = (os.getenv("HL_API_WALLET") or "").strip()
-PRIVATE_KEY         = (os.getenv("HL_PRIVATE_KEY") or "").strip()
-DEFAULT_SLIPPAGE    = float(os.getenv("HL_DEFAULT_SLIPPAGE", "0.02"))  # 2%
-DEFAULT_TIF         = os.getenv("HL_DEFAULT_TIF", "IOC").upper()
-DEFAULT_NOTIONAL    = float(os.getenv("HL_DEFAULT_NOTIONAL", "50"))    # fallback
+# -------- ENV / CONFIG --------
+NETWORK = os.getenv("HL_NETWORK", "testnet").lower()  # "testnet" or "mainnet"
+API_WALLET = os.getenv("HL_API_WALLET", "").strip()   # 0x...
+PRIVATE_KEY = os.getenv("HL_PRIVATE_KEY", "").strip() # 0x... (64 hex)
 
-# How long to wait (and poll) after a reduceOnly close before opening the flip
-FLAT_WAIT_SECS      = float(os.getenv("HL_FLAT_WAIT_SECS", "0.8"))
-FLAT_RETRY          = int(os.getenv("HL_FLAT_RETRY", "4"))
+DEFAULT_TIF = os.getenv("HL_DEFAULT_TIF", "IOC").upper()
+DEFAULT_SLIPPAGE = float(os.getenv("HL_DEFAULT_SLIPPAGE", "0.02"))  # 2%
+DEFAULT_LEVERAGE = int(os.getenv("HL_DEFAULT_LEVERAGE", "10"))
 
-_ex = None
+_ex = None  # ccxt singleton
+
 
 def ex() -> ccxt.Exchange:
     global _ex
-    if _ex: return _ex
+    if _ex is not None:
+        return _ex
 
     opts = {
         "apiKey": API_WALLET or None,
         "privateKey": PRIVATE_KEY or None,
         "walletAddress": API_WALLET or None,
-        "options": {
-            "defaultSlippage": DEFAULT_SLIPPAGE,
-        },
+        "options": {"defaultSlippage": DEFAULT_SLIPPAGE},
     }
     hl = ccxt.hyperliquid(opts)
 
@@ -41,168 +40,127 @@ def ex() -> ccxt.Exchange:
             hl.set_sandbox_mode(True)
             log.info("✅ ccxt Hyperliquid sandbox (testnet) enabled")
         except Exception as e:
-            log.warning("Could not enable sandbox: %s", e)
+            log.warning("Could not enable sandbox (testnet): %s", e)
 
     hl.load_markets(True)
     log.info("✅ Markets loaded: %s symbols", len(hl.markets))
+
     _ex = hl
     return _ex
 
-# ----------------- SYMBOL HELPERS -----------------
-def normalize_base(b: str) -> str:
-    """Return base like BTC, SOL, DOGE from many alert spellings."""
-    b = (b or "").upper().strip()
-    for suf in ("USDT.P", "USDT", "USDTP", "USD", "PERP"):
-        if b.endswith(suf):
-            b = b[: -len(suf)]
-            break
-    return b
 
-def symbol_to_hl(user_symbol: str) -> str:
-    base = normalize_base(user_symbol)
+# -------- HELPERS --------
+def normalize_user_symbol(s: str) -> str:
+    """
+    Accepts: 'BTC', 'BTCUSD', 'BTCUSDT', 'btc', etc.
+    Returns Hyperliquid symbol: 'BTC/USDC:USDC'
+    """
+    base = (s or "").upper().strip()
+    for suff in ("USDT", "USD", "USDC", "PERP"):
+        if base.endswith(suff) and len(base) > len(suff):
+            base = base[: -len(suff)]
+            break
+    base = base.strip()
     return f"{base}/USDC:USDC"
 
-# ----------------- PRECISION / PRICES -----------------
+
+def market_meta(symbol: str) -> Tuple[float, float, float]:
+    """
+    Returns (amount_step, min_amount, price_step)
+    """
+    m = ex().market(symbol)
+    amount_step = (
+        (m.get("precision") or {}).get("amount")
+        or m.get("amountPrecision")
+        or 0.00000001
+    )
+    min_amount = (
+        ((m.get("limits") or {}).get("amount") or {}).get("min")
+        or amount_step
+    )
+    price_step = (
+        (m.get("precision") or {}).get("price")
+        or m.get("pricePrecision")
+        or 0.00000001
+    )
+    return float(amount_step), float(min_amount), float(price_step)
+
+
+def floor_to_step(value: float, step: float) -> float:
+    if step <= 0:
+        return value
+    return math.floor(value / step) * step
+
+
+def clamp_amount(symbol: str, raw_amount: float) -> Tuple[float, Dict[str, Any]]:
+    step, min_amt, _ = market_meta(symbol)
+    floored = floor_to_step(max(raw_amount, 0.0), step)
+    if floored <= 0:
+        floored = step
+    if floored < min_amt:
+        floored = min_amt
+    final_amt = float(ex().amount_to_precision(symbol, floored))
+    return final_amt, {
+        "raw_amount": raw_amount,
+        "amount_step": step,
+        "min_amount": min_amt,
+        "floored": floored,
+        "final_amt": final_amt,
+    }
+
+
 def fetch_last(symbol: str) -> float:
     try:
         t = ex().fetch_ticker(symbol)
         px = t.get("last") or t.get("close")
-        if px: return float(px)
+        if px:
+            return float(px)
     except Exception:
         pass
     ob = ex().fetch_order_book(symbol, limit=5)
     bid = ob["bids"][0][0] if ob.get("bids") else None
     ask = ob["asks"][0][0] if ob.get("asks") else None
     if bid and ask:
-        return float((bid + ask) / 2.0)
+        return float((bid + ask) / 2)
     raise RuntimeError(f"Could not fetch last price for {symbol}")
 
-def market_meta(symbol: str) -> Tuple[float, float, float]:
-    m = ex().market(symbol)
-    amount_step = ((m.get("precision") or {}).get("amount")
-                   or m.get("amountPrecision") or 1e-8)
-    min_amount  = (((m.get("limits") or {}).get("amount") or {}).get("min")
-                   or amount_step)
-    price_step  = ((m.get("precision") or {}).get("price")
-                   or m.get("pricePrecision") or 1e-8)
-    return float(amount_step), float(min_amount), float(price_step)
-
-def floor_to_step(v: float, step: float) -> float:
-    if step <= 0: return v
-    return math.floor(v / step) * step
-
-def clamp_amount(symbol: str, raw_amount: float) -> Tuple[float, Dict[str, Any]]:
-    step, min_amt, _ = market_meta(symbol)
-    floored = floor_to_step(raw_amount, step)
-    if floored <= 0: floored = step
-    if floored < min_amt: floored = min_amt
-    final_amt = float(ex().amount_to_precision(symbol, floored))
-    return final_amt, {"raw_amount": raw_amount, "amount_step": step,
-                       "min_amount": min_amt, "floored": floored, "final_amt": final_amt}
 
 def amount_from_notional(symbol: str, notional: float) -> Tuple[float, Dict[str, Any]]:
     px = fetch_last(symbol)
     raw = float(notional) / float(px)
     amt, dbg = clamp_amount(symbol, raw)
+    step, min_amt, _ = market_meta(symbol)
+    min_notional = min_amt * px
+    if amt <= 0 or notional < min_notional:
+        raise ValueError(
+            f"Notional ${notional:.2f} is below minimum ~${min_notional:.2f} "
+            f"for {symbol} (min amount {min_amt}, step {step})."
+        )
     dbg.update({"notional": notional, "last_price": px})
-    # sanity against min notional
-    _, min_amt, _ = market_meta(symbol)
-    if amt < min_amt:
-        raise ValueError(f"Notional ${notional:.2f} too small; min ~{min_amt*px:.2f}")
     return amt, dbg
 
-# ----------------- POSITIONS -----------------
-def get_position(symbol: str) -> Dict[str, Any]:
-    """Return a compact position dict for symbol; zeroed if flat."""
+
+def set_leverage(symbol: str, lev: int):
     try:
-        positions = ex().fetch_positions([symbol])
-    except Exception:
-        positions = ex().fetch_positions()
-
-    pos = None
-    for p in (positions or []):
-        if p.get("symbol") == symbol:
-            pos = p
-            break
-
-    if not pos:
-        return {"size": 0.0, "side": "none", "symbol": symbol}
-
-    # ccxt unified: p["contracts"] is abs size; p["side"] in {"long","short","none"}
-    size = float(pos.get("contracts") or pos.get("contractSize") or pos.get("size") or 0.0)
-    side = pos.get("side") or ("none" if size == 0 else "long")  # best effort
-    # In HL, size is positive; rely on 'side'
-    if side not in ("long", "short"): side = "none"
-    return {"size": size, "side": side, "symbol": symbol, "raw": pos}
-
-def place_market(symbol: str, side: str, amount: float, tif: Optional[str], extra: dict = None):
-    ref_price = fetch_last(symbol)
-    params = {"slippage": DEFAULT_SLIPPAGE}
-    if tif: params["tif"] = tif
-    if extra: params.update(extra)
-    return ex().create_order(symbol, "market", side, float(amount), ref_price, params)
-
-# ----------------- FLIP LOGIC -----------------
-def flip_or_scale(symbol: str, desired_side: str, target_amt: float, tif: str) -> Dict[str, Any]:
-    """
-    Ensure the market ends with:
-      - a position on desired_side of size ~= target_amt (within one step)
-    """
-    pos = get_position(symbol)
-    step, _, _ = market_meta(symbol)
-    log.info("Current pos %s: side=%s size=%.8f (step=%g)", symbol, pos["side"], pos["size"], step)
-
-    # If flat -> just open target
-    if pos["side"] == "none" or pos["size"] <= (step * 0.5):
-        log.info("Opening new %s position on %s for %.8f units", desired_side, symbol, target_amt)
-        ord1 = place_market(symbol, desired_side, target_amt, tif)
-        return {"did": "open", "open": ord1}
-
-    # Same side -> scale to target (only trade the delta)
-    if pos["side"] == desired_side:
-        delta = target_amt - pos["size"]
-        # If within one step, no-op
-        if abs(delta) < step:
-            log.info("Same side & already at target (|delta| < step). No trade.")
-            return {"did": "noop", "reason": "at_target"}
-        side = desired_side if delta > 0 else ("sell" if desired_side == "long" else "buy")
-        amt = abs(delta)
-        log.info("Same side; scaling %s by %.8f", side, amt)
-        ord1 = place_market(symbol, side, amt, tif)
-        return {"did": "scale", "delta": delta, "order": ord1}
-
-    # Opposite side -> full flip: reduceOnly to flat, wait, then open new side
-    # First, flatten existing fully
-    close_side = "sell" if pos["side"] == "long" else "buy"
-    log.info("Opposite side; flattening %s %.8f with reduceOnly", symbol, pos["size"])
-    _ = place_market(symbol, close_side, pos["size"], "IOC", {"reduceOnly": True})
-
-    # Poll until flat (briefly)
-    for i in range(FLAT_RETRY):
-        time.sleep(FLAT_WAIT_SECS / max(1, FLAT_RETRY))
-        again = get_position(symbol)
-        if again["side"] == "none" or again["size"] <= (step * 0.5):
-            break
-
-    # Now open the new desired side at the target amount
-    open_side = "buy" if desired_side == "long" else "sell"
-    log.info("Opening flipped %s on %s for %.8f units", open_side, symbol, target_amt)
-    ord2 = place_market(symbol, open_side, target_amt, tif)
-    return {"did": "flip", "closedSize": pos["size"], "open": ord2}
-
-# ----------------- (Optional) leverage helper -----------------
-def try_set_leverage(symbol: str, lev: Optional[float]):
-    if not lev: return
-    try:
-        # ccxt hyperliquid supports set_leverage? Some builds do, some don't.
-        # We call and ignore failures (esp. testnet 422).
-        ex().set_leverage(lev, symbol)
-        log.info("Leverage set %sx for %s", lev, symbol)
+        if hasattr(ex(), "set_leverage"):
+            ex().set_leverage(lev, symbol)
     except Exception as e:
         log.warning("set_leverage failed for %s: %s (continuing)", symbol, e)
 
-# ----------------- FLASK APP -----------------
+
+def place_market(symbol: str, side: str, amount: float, tif: str, extra: Dict[str, Any] = None):
+    ref = fetch_last(symbol)
+    params = {"slippage": DEFAULT_SLIPPAGE}
+    if tif:
+        params["tif"] = tif
+    if extra:
+        params.update(extra)
+    return ex().create_order(symbol, "market", side, float(amount), ref, params)
+
+
+# -------- FLASK --------
 app = Flask(__name__)
+
 
 @app.get("/")
 def root():
@@ -211,36 +169,26 @@ def root():
         "network": NETWORK,
         "whoami": "/whoami",
         "health": "/health",
-        "markets": "/markets?base=SOL (or ?symbol=SOL/USDC:USDC)",
+        "markets": "/markets?symbol=SOL/USDC:USDC or ?base=SOL",
         "webhook": "/webhook/tradingview"
     })
 
+
 @app.get("/whoami")
 def whoami():
-    req = getattr(ex(), "requiredCredentials", None)
     return jsonify({
         "network": NETWORK,
         "apiWallet_env": API_WALLET,
         "ownerWallet": API_WALLET,
         "privateKey_present": bool(PRIVATE_KEY),
-        "ccxt_required": req,
+        "ccxt_required": getattr(ex(), "requiredCredentials", None),
     })
 
-@app.get("/health")
-def health():
-    ok_creds = bool(API_WALLET and PRIVATE_KEY)
-    bal = None
-    try:
-        bal = ex().fetch_balance().get("USDC", {}).get("free")
-    except Exception:
-        pass
-    return jsonify({"status": "healthy", "network": NETWORK,
-                    "credentials_set": ok_creds, "balance": bal})
 
 @app.get("/markets")
 def markets():
     base = request.args.get("base")
-    sym  = request.args.get("symbol")
+    sym = request.args.get("symbol")
     data = []
     if sym:
         m = ex().market(sym)
@@ -266,74 +214,90 @@ def markets():
                 })
     return jsonify({"count": len(data), "markets": data})
 
+
+@app.get("/health")
+def health():
+    ok_creds = bool(API_WALLET and PRIVATE_KEY)
+    bal = None
+    try:
+        bal = ex().fetch_balance().get("USDC", {}).get("free")
+    except Exception:
+        pass
+    return jsonify({
+        "status": "healthy",
+        "network": NETWORK,
+        "credentials_set": ok_creds,
+        "trading": "active",
+        "balance": bal
+    })
+
+
 @app.post("/webhook/tradingview")
 def tradingview():
     """
-    Body (from TradingView alert message):
-    {
-      "symbol": "BTC", "action": "buy" | "sell",
-      "quantity": 0.5,                 # OR
-      "notional": 50,                  # $ notional
-      "leverage": 20,                  # optional (best-effort)
-      "tif": "IOC" | "GTC"
-    }
+    Minimal execution:
+    - normalize symbol
+    - compute amount from notional OR use quantity
+    - optional leverage set
+    - place ONE market order
+    Example body:
+      {"symbol":"BTCUSD","action":"buy","notional":50,"leverage":20,"tif":"IOC"}
+      {"symbol":"SOL","action":"sell","quantity":1.25}
     """
     try:
         payload = request.get_json(force=True, silent=False) or {}
         log.info("Received alert: %s", payload)
 
-        base = payload.get("symbol")
-        if not base:
+        sym_raw = (payload.get("symbol") or "").strip()
+        if not sym_raw:
             return jsonify({"status": "error", "message": "Missing symbol"}), 400
 
-        hl_symbol = symbol_to_hl(base)
-        log.info("Resolved symbol '%s' -> '%s'", base, hl_symbol)
-        ex().market(hl_symbol)  # validate
+        hl_symbol = normalize_user_symbol(sym_raw)
+        log.info("Resolved symbol '%s' -> '%s'", sym_raw, hl_symbol)
+        ex().market(hl_symbol)  # ensure valid
 
-        action = (payload.get("action") or "").lower().strip()
+        action = (payload.get("action") or "").lower()
         if action not in ("buy", "sell"):
-            return jsonify({"status": "error", "message": "action must be buy or sell"}), 400
+            return jsonify({"status": "error", "message": "action must be 'buy' or 'sell'"}), 400
 
-        desired_side = "long" if action == "buy" else "short"
         tif = (payload.get("tif") or DEFAULT_TIF).upper()
+        leverage = int(payload.get("leverage") or DEFAULT_LEVERAGE)
+        set_leverage(hl_symbol, leverage)
 
-        # Best-effort leverage
-        lev = None
-        try:
-            lev = float(payload.get("leverage")) if payload.get("leverage") is not None else None
-        except Exception:
-            lev = None
-        try_set_leverage(hl_symbol, lev)
+        qty = payload.get("quantity")
+        notional = payload.get("notional")
+        amount_debug = {}
 
-        # Amount calc
-        debug = {}
-        if payload.get("quantity") is not None:
-            amt, dbg = clamp_amount(hl_symbol, float(payload["quantity"]))
-            debug["amount_from_quantity"] = dbg
+        if qty is not None:
+            amount, dbg = clamp_amount(hl_symbol, float(qty))
+            amount_debug["from_quantity"] = dbg
+        elif notional is not None:
+            amount, dbg = amount_from_notional(hl_symbol, float(notional))
+            amount_debug["from_notional"] = dbg
         else:
-            notional = float(payload.get("notional") or DEFAULT_NOTIONAL)
-            amt, dbg = amount_from_notional(hl_symbol, notional)
-            debug["amount_from_notional"] = dbg
+            return jsonify({"status": "error", "message": "Provide either quantity or notional"}), 400
 
-        result = flip_or_scale(hl_symbol, desired_side, amt, tif)
+        # Single market order; HL will flip if needed
+        order = place_market(hl_symbol, action, amount, tif)
 
         return jsonify({
             "status": "ok",
             "symbol": hl_symbol,
-            "requested_side": desired_side,
-            "target_amount": amt,
-            "result": result,
-            "debug": debug
+            "side": action,
+            "amount": amount,
+            "leverage": leverage,
+            "tif": tif,
+            "order": order,
+            "amount_debug": amount_debug
         })
 
-    except ValueError as ve:
-        return jsonify({"status": "error", "message": str(ve)}), 400
     except ccxt.BaseError as ce:
         log.exception("Exchange error")
         return jsonify({"status": "error", "message": f"hyperliquid {str(ce)}"}), 400
     except Exception as e:
         log.exception("Unhandled")
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), debug=False)
